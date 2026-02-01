@@ -5,26 +5,113 @@ import (
 	"time"
 )
 
-// Option configures a Client.
+// Option configures a [Client].
+//
+// Options are passed to [NewClient] to customize the client behavior.
+// Multiple options can be combined:
+//
+//	client := stromboli.NewClient("http://localhost:8585",
+//	    stromboli.WithTimeout(5*time.Minute),
+//	    stromboli.WithRetries(3),
+//	)
+//
+// Options are applied in order, so later options override earlier ones.
 type Option func(*Client)
 
-// WithTimeout sets the default request timeout.
+// WithTimeout sets the default timeout for all requests.
+//
+// The timeout applies to the entire request lifecycle, including
+// connection establishment, request sending, and response reading.
+// A timeout of zero means no timeout.
+//
+// Default: 30 seconds.
+//
+// Example:
+//
+//	client := stromboli.NewClient(url,
+//	    stromboli.WithTimeout(5*time.Minute), // Long timeout for slow operations
+//	)
+//
+// For per-request timeouts, use context.WithTimeout instead:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+//	defer cancel()
+//	result, err := client.Health(ctx)
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		c.timeout = d
 	}
 }
 
-// WithRetries sets the maximum number of retries for failed requests.
+// WithRetries sets the maximum number of retry attempts for failed requests.
+//
+// Retries are only attempted for transient errors (network errors,
+// 5xx responses). Client errors (4xx responses) are not retried.
+//
+// The retry delay uses exponential backoff with jitter:
+//   - First retry: 100-200ms
+//   - Second retry: 200-400ms
+//   - Third retry: 400-800ms
+//   - And so on...
+//
+// Default: 0 (no retries).
+//
+// Example:
+//
+//	client := stromboli.NewClient(url,
+//	    stromboli.WithRetries(3), // Retry up to 3 times
+//	)
 func WithRetries(n int) Option {
 	return func(c *Client) {
 		c.maxRetries = n
 	}
 }
 
-// WithHTTPClient sets a custom HTTP client.
+// WithHTTPClient sets a custom HTTP client for making requests.
+//
+// Use this option to customize transport settings like:
+//   - TLS configuration
+//   - Proxy settings
+//   - Connection pooling
+//   - Custom transports (e.g., for testing)
+//
+// The provided client's Timeout field is ignored in favor of
+// [WithTimeout]. Use [WithTimeout] to control request timeouts.
+//
+// Default: [http.DefaultClient].
+//
+// Example:
+//
+//	httpClient := &http.Client{
+//	    Transport: &http.Transport{
+//	        MaxIdleConns:        100,
+//	        MaxIdleConnsPerHost: 10,
+//	        IdleConnTimeout:     90 * time.Second,
+//	    },
+//	}
+//	client := stromboli.NewClient(url,
+//	    stromboli.WithHTTPClient(httpClient),
+//	)
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *Client) {
 		c.httpClient = httpClient
+	}
+}
+
+// WithUserAgent sets a custom User-Agent header for all requests.
+//
+// The User-Agent is sent with every request and can be used for
+// server-side analytics or debugging.
+//
+// Default: "stromboli-go/{version}".
+//
+// Example:
+//
+//	client := stromboli.NewClient(url,
+//	    stromboli.WithUserAgent("my-app/1.0.0"),
+//	)
+func WithUserAgent(userAgent string) Option {
+	return func(c *Client) {
+		c.userAgent = userAgent
 	}
 }
