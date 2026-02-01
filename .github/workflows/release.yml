@@ -41,6 +41,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -48,19 +49,43 @@ jobs:
           go-version: '1.23'
           cache: true
 
-      - name: Get version
+      - name: Get version from tag
         id: version
-        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
-
-      - name: Verify version matches code
         run: |
-          CODE_VERSION="v$(grep 'const Version' version.go | cut -d'"' -f2)"
-          TAG_VERSION="${{ steps.version.outputs.version }}"
-          if [[ "$CODE_VERSION" != "$TAG_VERSION" ]]; then
-            echo "Error: Tag version ($TAG_VERSION) doesn't match code version ($CODE_VERSION)"
-            exit 1
+          TAG_VERSION="${GITHUB_REF#refs/tags/}"
+          # Remove 'v' prefix for version.go (stores without 'v')
+          CODE_VERSION="${TAG_VERSION#v}"
+          echo "tag_version=$TAG_VERSION" >> $GITHUB_OUTPUT
+          echo "code_version=$CODE_VERSION" >> $GITHUB_OUTPUT
+
+      - name: Update version.go if needed
+        run: |
+          CURRENT_VERSION=$(grep 'const Version' version.go | cut -d'"' -f2)
+          NEW_VERSION="${{ steps.version.outputs.code_version }}"
+
+          if [[ "$CURRENT_VERSION" != "$NEW_VERSION" ]]; then
+            echo "Updating version.go: $CURRENT_VERSION -> $NEW_VERSION"
+            sed -i "s/const Version = \".*\"/const Version = \"$NEW_VERSION\"/" version.go
+
+            # Configure git
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+
+            # Commit the change
+            git add version.go
+            git commit -m "chore: update version to $NEW_VERSION [skip ci]"
+
+            # Move the tag to include the version update
+            git tag -f ${{ steps.version.outputs.tag_version }}
+
+            # Push changes (force push the tag)
+            git push origin HEAD:main
+            git push origin ${{ steps.version.outputs.tag_version }} --force
+
+            echo "Version updated and tag moved"
+          else
+            echo "Version already correct: $CURRENT_VERSION"
           fi
-          echo "Version verified: $TAG_VERSION"
 
       - name: Generate changelog
         id: changelog
@@ -80,10 +105,10 @@ jobs:
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.tag_version }}
           body_path: /tmp/changelog.txt
           draft: false
-          prerelease: ${{ contains(steps.version.outputs.version, '-') }}
+          prerelease: ${{ contains(steps.version.outputs.tag_version, '-') }}
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
