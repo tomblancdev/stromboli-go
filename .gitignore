@@ -33,3 +33,6 @@ Thumbs.db
 
 # Vendor (if not committing)
 # vendor/
+
+# Generated mocks (run make mocks to regenerate)
+mocks/
