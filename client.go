@@ -14,6 +14,7 @@ import (
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
 	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
+	"github.com/tomblancdev/stromboli-go/generated/client/sessions"
 	"github.com/tomblancdev/stromboli-go/generated/client/system"
 	"github.com/tomblancdev/stromboli-go/generated/models"
 )
@@ -652,6 +653,245 @@ func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
 	}
 
 	return job
+}
+
+// ----------------------------------------------------------------------------
+// Session Methods
+// ----------------------------------------------------------------------------
+
+// ListSessions returns all existing session IDs.
+//
+// Sessions are created automatically when running Claude with a new
+// conversation. Use this method to list all available sessions for
+// resumption or cleanup.
+//
+// Example:
+//
+//	sessionIDs, err := client.ListSessions(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, id := range sessionIDs {
+//	    fmt.Printf("Session: %s\n", id)
+//	}
+//
+// To continue a specific session, use the session ID with [ClaudeOptions.SessionID]:
+//
+//	result, _ := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt: "What did we discuss earlier?",
+//	    Claude: &stromboli.ClaudeOptions{
+//	        SessionID: sessionIDs[0],
+//	        Resume:    true,
+//	    },
+//	})
+func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
+	// Create request parameters with context
+	params := sessions.NewGetSessionsParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request
+	resp, err := c.api.Sessions.GetSessions(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to list sessions")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty sessions list response", 0, nil)
+	}
+
+	return payload.Sessions, nil
+}
+
+// DestroySession removes a session and all its stored data.
+//
+// Use this method to clean up old sessions that are no longer needed.
+// This operation is permanent and cannot be undone.
+//
+// Example:
+//
+//	err := client.DestroySession(ctx, "sess-abc123")
+//	if err != nil {
+//	    if errors.Is(err, stromboli.ErrNotFound) {
+//	        fmt.Println("Session not found")
+//	    } else {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	fmt.Println("Session destroyed")
+//
+// Bulk cleanup:
+//
+//	sessions, _ := client.ListSessions(ctx)
+//	for _, id := range sessions {
+//	    if err := client.DestroySession(ctx, id); err != nil {
+//	        log.Printf("Failed to destroy %s: %v\n", id, err)
+//	    }
+//	}
+func (c *Client) DestroySession(ctx context.Context, sessionID string) error {
+	if sessionID == "" {
+		return newError("BAD_REQUEST", "session ID is required", 400, nil)
+	}
+
+	// Create request parameters with context
+	params := sessions.NewDeleteSessionsIDParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetID(sessionID)
+
+	// Execute request
+	_, err := c.api.Sessions.DeleteSessionsID(params)
+	if err != nil {
+		return c.handleError(err, "failed to destroy session")
+	}
+
+	return nil
+}
+
+// GetMessages returns paginated conversation history for a session.
+//
+// Use this method to retrieve past messages from a session, including
+// user prompts, assistant responses, tool calls, and results.
+//
+// Basic usage:
+//
+//	messages, err := client.GetMessages(ctx, "sess-abc123", nil)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, msg := range messages.Messages {
+//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	}
+//
+// With pagination:
+//
+//	messages, _ := client.GetMessages(ctx, "sess-abc123", &stromboli.GetMessagesOptions{
+//	    Limit:  50,
+//	    Offset: 100,
+//	})
+//
+//	if messages.HasMore {
+//	    // Fetch next page
+//	    nextPage, _ := client.GetMessages(ctx, "sess-abc123", &stromboli.GetMessagesOptions{
+//	        Limit:  50,
+//	        Offset: messages.Offset + messages.Limit,
+//	    })
+//	}
+func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMessagesOptions) (*MessagesResponse, error) {
+	if sessionID == "" {
+		return nil, newError("BAD_REQUEST", "session ID is required", 400, nil)
+	}
+
+	// Create request parameters with context
+	params := sessions.NewGetSessionsIDMessagesParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetID(sessionID)
+
+	// Apply options if provided
+	if opts != nil {
+		if opts.Limit > 0 {
+			params.SetLimit(&opts.Limit)
+		}
+		if opts.Offset > 0 {
+			params.SetOffset(&opts.Offset)
+		}
+	}
+
+	// Execute request
+	resp, err := c.api.Sessions.GetSessionsIDMessages(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to get messages")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty messages response", 0, nil)
+	}
+
+	// Map messages
+	messages := make([]*Message, 0, len(payload.Messages))
+	for _, m := range payload.Messages {
+		if m != nil {
+			messages = append(messages, c.fromGeneratedMessage(m))
+		}
+	}
+
+	return &MessagesResponse{
+		Messages: messages,
+		Total:    payload.Total,
+		Limit:    payload.Limit,
+		Offset:   payload.Offset,
+		HasMore:  payload.HasMore,
+	}, nil
+}
+
+// GetMessage returns a specific message from session history by UUID.
+//
+// Use this method to retrieve full details about a specific message,
+// including its content, tool calls, and results.
+//
+// Example:
+//
+//	msg, err := client.GetMessage(ctx, "sess-abc123", "msg-uuid-456")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Role: %s\n", msg.Role)
+//	fmt.Printf("Content: %v\n", msg.Content)
+func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*Message, error) {
+	if sessionID == "" {
+		return nil, newError("BAD_REQUEST", "session ID is required", 400, nil)
+	}
+	if messageID == "" {
+		return nil, newError("BAD_REQUEST", "message ID is required", 400, nil)
+	}
+
+	// Create request parameters with context
+	params := sessions.NewGetSessionsIDMessagesMessageIDParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetID(sessionID)
+	params.SetMessageID(messageID)
+
+	// Execute request
+	resp, err := c.api.Sessions.GetSessionsIDMessagesMessageID(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to get message")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil || payload.Message == nil {
+		return nil, newError("INVALID_RESPONSE", "empty message response", 0, nil)
+	}
+
+	return c.fromGeneratedMessage(payload.Message), nil
+}
+
+// fromGeneratedMessage converts a generated message to our Message type.
+func (c *Client) fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
+	return &Message{
+		UUID:           m.UUID,
+		Type:           string(m.Type.StromboliInternalHistoryMessageType),
+		ParentUUID:     m.ParentUUID,
+		SessionID:      m.SessionID,
+		Cwd:            m.Cwd,
+		GitBranch:      m.GitBranch,
+		PermissionMode: m.PermissionMode,
+		Timestamp:      m.Timestamp,
+		Version:        m.Version,
+		// Note: Content and ToolResult are complex nested structures.
+		// We expose them as interface{} for flexibility.
+		Content:    m.Content,
+		ToolResult: m.ToolResult,
+	}
 }
 
 // ----------------------------------------------------------------------------

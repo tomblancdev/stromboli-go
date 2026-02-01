@@ -425,6 +425,101 @@ type CrashInfo struct {
 }
 
 // ----------------------------------------------------------------------------
+// Session Types
+// ----------------------------------------------------------------------------
+
+// GetMessagesOptions configures the pagination for [Client.GetMessages].
+//
+// Example:
+//
+//	messages, _ := client.GetMessages(ctx, "sess-abc123", &stromboli.GetMessagesOptions{
+//	    Limit:  50,
+//	    Offset: 100,
+//	})
+type GetMessagesOptions struct {
+	// Limit is the maximum number of messages to return (default: 50, max: 200).
+	Limit int64 `json:"limit,omitempty"`
+
+	// Offset is the number of messages to skip (for pagination).
+	Offset int64 `json:"offset,omitempty"`
+}
+
+// MessagesResponse represents a paginated list of session messages.
+//
+// Use [Client.GetMessages] to retrieve messages from a session:
+//
+//	resp, _ := client.GetMessages(ctx, "sess-abc123", nil)
+//	for _, msg := range resp.Messages {
+//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	}
+//
+//	if resp.HasMore {
+//	    // Fetch more messages...
+//	}
+type MessagesResponse struct {
+	// Messages is the list of messages in this page.
+	Messages []*Message `json:"messages"`
+
+	// Total is the total number of messages in the session.
+	Total int64 `json:"total"`
+
+	// Limit is the maximum messages per page (requested or default).
+	Limit int64 `json:"limit"`
+
+	// Offset is the number of messages skipped.
+	Offset int64 `json:"offset"`
+
+	// HasMore indicates if there are more messages to fetch.
+	HasMore bool `json:"has_more"`
+}
+
+// Message represents a single message from session history.
+//
+// Messages can be user prompts, assistant responses, or tool interactions.
+// Use [Client.GetMessages] to list messages or [Client.GetMessage] to get
+// a specific message by UUID.
+type Message struct {
+	// UUID is the unique message identifier.
+	// Example: "92242819-b7d1-48d4-b023-6134c3e9f63a"
+	UUID string `json:"uuid,omitempty"`
+
+	// Type indicates the message type.
+	// Values: "user", "assistant", "queue-operation"
+	Type string `json:"type,omitempty"`
+
+	// ParentUUID is the parent message UUID for threading.
+	ParentUUID string `json:"parent_uuid,omitempty"`
+
+	// SessionID is the session this message belongs to.
+	SessionID string `json:"session_id,omitempty"`
+
+	// Cwd is the working directory at time of message.
+	// Example: "/workspace"
+	Cwd string `json:"cwd,omitempty"`
+
+	// GitBranch is the git branch at time of message.
+	// Example: "main"
+	GitBranch string `json:"git_branch,omitempty"`
+
+	// PermissionMode is the permission mode active for this message.
+	// Example: "bypassPermissions"
+	PermissionMode string `json:"permission_mode,omitempty"`
+
+	// Timestamp is when the message was created (RFC3339 format).
+	Timestamp string `json:"timestamp,omitempty"`
+
+	// Version is the Claude Code version that created this message.
+	Version string `json:"version,omitempty"`
+
+	// Content contains the message content (text, tool calls, etc.).
+	// The structure varies by message type.
+	Content interface{} `json:"content,omitempty"`
+
+	// ToolResult contains tool use results (for tool_result messages).
+	ToolResult interface{} `json:"tool_result,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
 
