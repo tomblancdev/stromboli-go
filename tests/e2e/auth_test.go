@@ -120,10 +120,11 @@ func TestAuthFlow_E2E(t *testing.T) {
 // TestWithToken_Option tests creating a client with a pre-set token.
 func TestWithToken_Option(t *testing.T) {
 	// Create a server that checks for the auth header
-	client := stromboli.NewClient(
+	client, err := stromboli.NewClient(
 		getBaseURL(),
 		stromboli.WithToken("pre-set-token"),
 	)
+	require.NoError(t, err, "NewClient should succeed")
 	ctx := newTestContext(t)
 
 	// This should use the pre-set token
