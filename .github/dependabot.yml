@@ -10,6 +10,16 @@ updates:
     labels:
       - "dependencies"
       - "go"
+    groups:
+      go-openapi:
+        patterns:
+          - "github.com/go-openapi/*"
+      all-go-deps:
+        patterns:
+          - "*"
+        update-types:
+          - "minor"
+          - "patch"
 
   # GitHub Actions
   - package-ecosystem: "github-actions"
@@ -21,3 +31,7 @@ updates:
     labels:
       - "dependencies"
       - "ci"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
