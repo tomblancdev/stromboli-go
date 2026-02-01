@@ -1,7 +1,6 @@
 package stromboli
 
 import (
-	"errors"
 	"fmt"
 )
 
@@ -70,11 +69,11 @@ func (e *Error) Unwrap() error {
 //	    // Handle not found
 //	}
 func (e *Error) Is(target error) bool {
-	var t *Error
-	if errors.As(target, &t) {
-		return e.Code == t.Code
+	t, ok := target.(*Error)
+	if !ok {
+		return false
 	}
-	return false
+	return e.Code == t.Code
 }
 
 // Sentinel errors for common error conditions.
