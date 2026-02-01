@@ -13,7 +13,7 @@ import (
 //   - MAJOR: Breaking changes to the public API
 //   - MINOR: New features, backwards compatible
 //   - PATCH: Bug fixes, backwards compatible
-const Version = "0.1.0"
+const Version = "0.2.0-alpha"
 
 // APIVersion is the target Stromboli API version this SDK was built for.
 //

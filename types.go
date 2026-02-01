@@ -203,6 +203,31 @@ type ClaudeOptions struct {
 	// Values: "text", "json", "stream-json"
 	OutputFormat string `json:"output_format,omitempty"`
 
+	// JSONSchema specifies a JSON Schema for structured output validation.
+	// When set, Claude's output MUST conform to this schema.
+	// Requires OutputFormat to be "json" for best results.
+	//
+	// If the output does not match the schema, the API may return an error
+	// or Claude may retry to produce conforming output (behavior depends on
+	// the Stromboli server configuration).
+	//
+	// Example:
+	//
+	//	&stromboli.ClaudeOptions{
+	//	    OutputFormat: "json",
+	//	    JSONSchema: `{
+	//	        "type": "object",
+	//	        "required": ["summary", "score"],
+	//	        "properties": {
+	//	            "summary": {"type": "string"},
+	//	            "score": {"type": "integer", "minimum": 0, "maximum": 100}
+	//	        }
+	//	    }`,
+	//	}
+	//
+	// See: https://json-schema.org/specification
+	JSONSchema string `json:"json_schema,omitempty"`
+
 	// Verbose enables detailed logging.
 	Verbose bool `json:"verbose,omitempty"`
 
