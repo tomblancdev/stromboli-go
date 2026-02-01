@@ -585,3 +585,74 @@ const (
 	// JobStatusCancelled indicates the job was cancelled.
 	JobStatusCancelled = "cancelled"
 )
+
+// ----------------------------------------------------------------------------
+// Auth Types
+// ----------------------------------------------------------------------------
+
+// TokenResponse represents JWT tokens returned by authentication endpoints.
+//
+// Use [Client.GetToken] to obtain tokens:
+//
+//	tokens, err := client.GetToken(ctx, "my-client-id")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Printf("Access token: %s\n", tokens.AccessToken)
+type TokenResponse struct {
+	// AccessToken is the JWT access token for API authentication.
+	// Use with [WithToken] option or pass to authenticated endpoints.
+	AccessToken string `json:"access_token"`
+
+	// RefreshToken is used to obtain new access tokens.
+	// Use with [Client.RefreshToken] when the access token expires.
+	RefreshToken string `json:"refresh_token"`
+
+	// ExpiresIn is the access token lifetime in seconds.
+	// Example: 3600 (1 hour)
+	ExpiresIn int64 `json:"expires_in"`
+
+	// TokenType is the token type, typically "Bearer".
+	TokenType string `json:"token_type"`
+}
+
+// TokenValidation represents the result of validating a JWT token.
+//
+// Use [Client.ValidateToken] to validate the current token:
+//
+//	validation, err := client.ValidateToken(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if validation.Valid {
+//	    fmt.Printf("Token valid until: %d\n", validation.ExpiresAt)
+//	}
+type TokenValidation struct {
+	// Valid indicates whether the token is valid.
+	Valid bool `json:"valid"`
+
+	// Subject is the token subject (typically client ID).
+	Subject string `json:"subject"`
+
+	// ExpiresAt is the token expiration time as Unix timestamp.
+	ExpiresAt int64 `json:"expires_at"`
+}
+
+// LogoutResponse represents the result of invalidating a token.
+//
+// Use [Client.Logout] to invalidate the current token:
+//
+//	result, err := client.Logout(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	if result.Success {
+//	    fmt.Println("Logged out successfully")
+//	}
+type LogoutResponse struct {
+	// Success indicates whether the logout was successful.
+	Success bool `json:"success"`
+
+	// Message provides additional context about the logout.
+	Message string `json:"message"`
+}

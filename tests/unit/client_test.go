@@ -1040,3 +1040,313 @@ func TestGetMessage_EmptyMessageID(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
 }
+
+// ============================================================================
+// Auth Tests
+// ============================================================================
+
+// TestGetToken_Success tests the GetToken method.
+func TestGetToken_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/auth/token", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"access_token":  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
+			"refresh_token": "refresh_abc123",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	tokens, err := client.GetToken(context.Background(), "my-client-id")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...", tokens.AccessToken)
+	assert.Equal(t, "refresh_abc123", tokens.RefreshToken)
+	assert.Equal(t, int64(3600), tokens.ExpiresIn)
+	assert.Equal(t, "Bearer", tokens.TokenType)
+}
+
+// TestGetToken_EmptyClientID tests GetToken with an empty client ID.
+func TestGetToken_EmptyClientID(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	tokens, err := client.GetToken(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, tokens)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestRefreshToken_Success tests the RefreshToken method.
+func TestRefreshToken_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/auth/refresh", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"access_token":  "new_access_token_xyz",
+			"refresh_token": "new_refresh_token_xyz",
+			"expires_in":    3600,
+			"token_type":    "Bearer",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	tokens, err := client.RefreshToken(context.Background(), "old_refresh_token")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "new_access_token_xyz", tokens.AccessToken)
+	assert.Equal(t, "new_refresh_token_xyz", tokens.RefreshToken)
+	assert.Equal(t, int64(3600), tokens.ExpiresIn)
+}
+
+// TestRefreshToken_EmptyToken tests RefreshToken with an empty token.
+func TestRefreshToken_EmptyToken(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	tokens, err := client.RefreshToken(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, tokens)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestValidateToken_Success tests the ValidateToken method.
+func TestValidateToken_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/auth/validate", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Verify auth header
+		authHeader := r.Header.Get("Authorization")
+		assert.Equal(t, "Bearer test-token-123", authHeader)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"valid":      true,
+			"subject":    "my-client-id",
+			"expires_at": 1704067200, // 2024-01-01 00:00:00 UTC
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	validation, err := client.ValidateToken(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, validation.Valid)
+	assert.Equal(t, "my-client-id", validation.Subject)
+	assert.Equal(t, int64(1704067200), validation.ExpiresAt)
+}
+
+// TestValidateToken_NoToken tests ValidateToken without a token set.
+func TestValidateToken_NoToken(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	validation, err := client.ValidateToken(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, validation)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "UNAUTHORIZED", apiErr.Code)
+}
+
+// TestLogout_Success tests the Logout method.
+func TestLogout_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/auth/logout", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Verify auth header
+		authHeader := r.Header.Get("Authorization")
+		assert.Equal(t, "Bearer test-token-123", authHeader)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"success": true,
+			"message": "Token invalidated successfully",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	result, err := client.Logout(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "Token invalidated successfully", result.Message)
+}
+
+// TestLogout_NoToken tests Logout without a token set.
+func TestLogout_NoToken(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	result, err := client.Logout(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, result)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "UNAUTHORIZED", apiErr.Code)
+}
+
+// TestSetToken tests the SetToken method.
+func TestSetToken(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify auth header after SetToken
+		authHeader := r.Header.Get("Authorization")
+		assert.Equal(t, "Bearer new-token-456", authHeader)
+
+		resp := map[string]interface{}{
+			"valid":      true,
+			"subject":    "test",
+			"expires_at": 1704067200,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	client.SetToken("new-token-456")
+	validation, err := client.ValidateToken(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, validation.Valid)
+}
+
+// ============================================================================
+// Secrets Tests
+// ============================================================================
+
+// TestListSecrets_Success tests the ListSecrets method.
+func TestListSecrets_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"secrets": []string{"github-token", "gitlab-token", "npm-token"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	secrets, err := client.ListSecrets(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, secrets, 3)
+	assert.Contains(t, secrets, "github-token")
+	assert.Contains(t, secrets, "gitlab-token")
+	assert.Contains(t, secrets, "npm-token")
+}
+
+// TestListSecrets_Empty tests ListSecrets when no secrets exist.
+func TestListSecrets_Empty(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"secrets": []string{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	secrets, err := client.ListSecrets(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Empty(t, secrets)
+}
+
+// TestListSecrets_Error tests ListSecrets when the server returns an error.
+func TestListSecrets_Error(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"secrets": []string{},
+			"error":   "podman not available",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	secrets, err := client.ListSecrets(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, secrets)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "SECRETS_ERROR", apiErr.Code)
+	assert.Contains(t, apiErr.Message, "podman not available")
+}

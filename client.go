@@ -12,8 +12,10 @@ import (
 	"github.com/go-openapi/strfmt"
 
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
+	"github.com/tomblancdev/stromboli-go/generated/client/auth"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
 	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
+	"github.com/tomblancdev/stromboli-go/generated/client/secrets"
 	"github.com/tomblancdev/stromboli-go/generated/client/sessions"
 	"github.com/tomblancdev/stromboli-go/generated/client/system"
 	"github.com/tomblancdev/stromboli-go/generated/models"
@@ -52,6 +54,15 @@ const (
 // Execution:
 //   - [Client.Run]: Execute Claude synchronously
 //   - [Client.RunAsync]: Execute Claude asynchronously (returns job ID)
+//
+// Auth:
+//   - [Client.GetToken]: Obtain JWT tokens
+//   - [Client.RefreshToken]: Refresh access token
+//   - [Client.ValidateToken]: Validate current token
+//   - [Client.Logout]: Invalidate current token
+//
+// Secrets:
+//   - [Client.ListSecrets]: List available Podman secrets
 type Client struct {
 	// baseURL is the Stromboli API base URL.
 	baseURL string
@@ -67,6 +78,9 @@ type Client struct {
 
 	// userAgent is the User-Agent header value.
 	userAgent string
+
+	// token is the Bearer token for authenticated requests.
+	token string
 
 	// api is the generated API client.
 	api *generatedclient.StromboliAPI
@@ -950,4 +964,277 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error 
 	default:
 		return newError("REQUEST_FAILED", message, status, apiErr)
 	}
+}
+
+// ----------------------------------------------------------------------------
+// Auth Methods
+// ----------------------------------------------------------------------------
+
+// bearerAuth returns a runtime.ClientAuthInfoWriter for Bearer token auth.
+func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
+	return httptransport.BearerToken(c.token)
+}
+
+// SetToken sets the Bearer token for authenticated requests.
+//
+// This token is used for endpoints that require authentication,
+// such as [Client.ValidateToken] and [Client.Logout].
+//
+// Example:
+//
+//	tokens, _ := client.GetToken(ctx, "my-client-id")
+//	client.SetToken(tokens.AccessToken)
+//
+//	// Now authenticated endpoints will work
+//	validation, _ := client.ValidateToken(ctx)
+func (c *Client) SetToken(token string) {
+	c.token = token
+}
+
+// GetToken obtains JWT tokens using a client ID.
+//
+// Use this method to authenticate with the Stromboli API. The returned
+// tokens can be used for subsequent authenticated requests.
+//
+// Example:
+//
+//	tokens, err := client.GetToken(ctx, "my-client-id")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	// Set the token for future requests
+//	client.SetToken(tokens.AccessToken)
+//
+//	// Token expires in tokens.ExpiresIn seconds
+//	fmt.Printf("Token expires in %d seconds\n", tokens.ExpiresIn)
+func (c *Client) GetToken(ctx context.Context, clientID string) (*TokenResponse, error) {
+	if clientID == "" {
+		return nil, newError("BAD_REQUEST", "client ID is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := auth.NewPostAuthTokenParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetRequest(&models.TokenRequest{
+		ClientID: &clientID,
+	})
+
+	// Execute request (uses bearer auth if token is set, for security)
+	resp, err := c.api.Auth.PostAuthToken(params, c.bearerAuth())
+	if err != nil {
+		return nil, c.handleError(err, "failed to get token")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty token response", 0, nil)
+	}
+
+	return &TokenResponse{
+		AccessToken:  payload.AccessToken,
+		RefreshToken: payload.RefreshToken,
+		ExpiresIn:    payload.ExpiresIn,
+		TokenType:    payload.TokenType,
+	}, nil
+}
+
+// RefreshToken obtains a new access token using a refresh token.
+//
+// Use this method when your access token has expired. The refresh
+// token has a longer lifetime and can be used to obtain new access tokens.
+//
+// Example:
+//
+//	// When access token expires, use refresh token
+//	newTokens, err := client.RefreshToken(ctx, tokens.RefreshToken)
+//	if err != nil {
+//	    // Refresh token may also be expired, need to re-authenticate
+//	    log.Fatal(err)
+//	}
+//
+//	client.SetToken(newTokens.AccessToken)
+func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenResponse, error) {
+	if refreshToken == "" {
+		return nil, newError("BAD_REQUEST", "refresh token is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := auth.NewPostAuthRefreshParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetRequest(&models.RefreshRequest{
+		RefreshToken: &refreshToken,
+	})
+
+	// Execute request (no auth required for refresh)
+	resp, err := c.api.Auth.PostAuthRefresh(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to refresh token")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty token response", 0, nil)
+	}
+
+	return &TokenResponse{
+		AccessToken:  payload.AccessToken,
+		RefreshToken: payload.RefreshToken,
+		ExpiresIn:    payload.ExpiresIn,
+		TokenType:    payload.TokenType,
+	}, nil
+}
+
+// ValidateToken validates the current access token and returns its claims.
+//
+// This method requires a valid token to be set using [Client.SetToken].
+//
+// Example:
+//
+//	client.SetToken(accessToken)
+//
+//	validation, err := client.ValidateToken(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if validation.Valid {
+//	    fmt.Printf("Token valid for subject: %s\n", validation.Subject)
+//	    fmt.Printf("Expires at: %d\n", validation.ExpiresAt)
+//	}
+func (c *Client) ValidateToken(ctx context.Context) (*TokenValidation, error) {
+	if c.token == "" {
+		return nil, newError("UNAUTHORIZED", "no token set, use SetToken() first", 401, nil)
+	}
+
+	// Create request parameters
+	params := auth.NewGetAuthValidateParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request with bearer auth
+	resp, err := c.api.Auth.GetAuthValidate(params, c.bearerAuth())
+	if err != nil {
+		return nil, c.handleError(err, "failed to validate token")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty validation response", 0, nil)
+	}
+
+	return &TokenValidation{
+		Valid:     payload.Valid,
+		Subject:   payload.Subject,
+		ExpiresAt: payload.ExpiresAt,
+	}, nil
+}
+
+// Logout invalidates the current access token.
+//
+// After calling this method, the token will no longer be accepted by the API.
+// This method requires a valid token to be set using [Client.SetToken].
+//
+// Example:
+//
+//	client.SetToken(accessToken)
+//
+//	result, err := client.Logout(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if result.Success {
+//	    fmt.Println("Successfully logged out")
+//	    client.SetToken("") // Clear the token
+//	}
+func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
+	if c.token == "" {
+		return nil, newError("UNAUTHORIZED", "no token set, use SetToken() first", 401, nil)
+	}
+
+	// Create request parameters
+	params := auth.NewPostAuthLogoutParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request with bearer auth
+	resp, err := c.api.Auth.PostAuthLogout(params, c.bearerAuth())
+	if err != nil {
+		return nil, c.handleError(err, "failed to logout")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty logout response", 0, nil)
+	}
+
+	return &LogoutResponse{
+		Success: payload.Success,
+		Message: payload.Message,
+	}, nil
+}
+
+// ----------------------------------------------------------------------------
+// Secrets Methods
+// ----------------------------------------------------------------------------
+
+// ListSecrets returns all available Podman secrets.
+//
+// These secrets can be injected into container execution environments
+// using [PodmanOptions.SecretsEnv].
+//
+// Example:
+//
+//	secrets, err := client.ListSecrets(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, name := range secrets {
+//	    fmt.Printf("Available secret: %s\n", name)
+//	}
+//
+// Using secrets in execution:
+//
+//	secrets, _ := client.ListSecrets(ctx)
+//
+//	result, _ := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt: "Use my GitHub token to list repos",
+//	    Podman: &stromboli.PodmanOptions{
+//	        SecretsEnv: map[string]string{
+//	            "GITHUB_TOKEN": secrets[0], // Use first available secret
+//	        },
+//	    },
+//	})
+func (c *Client) ListSecrets(ctx context.Context) ([]string, error) {
+	// Create request parameters
+	params := secrets.NewGetSecretsParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request
+	resp, err := c.api.Secrets.GetSecrets(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to list secrets")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty secrets response", 0, nil)
+	}
+
+	// Check for error in response
+	if payload.Error != "" {
+		return nil, newError("SECRETS_ERROR", payload.Error, 500, nil)
+	}
+
+	return payload.Secrets, nil
 }

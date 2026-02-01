@@ -115,3 +115,25 @@ func WithUserAgent(userAgent string) Option {
 		c.userAgent = userAgent
 	}
 }
+
+// WithToken sets the Bearer token for authenticated requests.
+//
+// Use this option when you already have a valid access token and
+// want to create an authenticated client from the start.
+//
+// Alternatively, use [Client.SetToken] to set the token after
+// client creation, or [Client.GetToken] to obtain a new token.
+//
+// Example:
+//
+//	client := stromboli.NewClient(url,
+//	    stromboli.WithToken("my-access-token"),
+//	)
+//
+//	// Authenticated endpoints now work
+//	validation, err := client.ValidateToken(ctx)
+func WithToken(token string) Option {
+	return func(c *Client) {
+		c.token = token
+	}
+}
