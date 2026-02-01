@@ -147,7 +147,12 @@ func (s *Stream) Close() error {
 func (s *Stream) Events() <-chan *StreamEvent {
 	ch := make(chan *StreamEvent)
 	go func() {
-		defer close(ch)
+		defer func() {
+			if r := recover(); r != nil {
+				s.err = fmt.Errorf("panic in stream reader: %v", r)
+			}
+			close(ch)
+		}()
 		for s.Next() {
 			ch <- s.current
 		}
@@ -209,7 +214,17 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 // This method connects to the SSE (Server-Sent Events) endpoint and
 // returns a [Stream] that yields events as they arrive.
 //
-// Basic usage:
+// # Timeout Behavior
+//
+// The client timeout ([WithTimeout]) does NOT apply to streaming requests
+// because streams are designed for long-running connections. Use
+// context.WithTimeout to set a deadline:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+//	defer cancel()
+//	stream, err := client.Stream(ctx, req)
+//
+// # Basic Usage
 //
 //	stream, err := client.Stream(ctx, &stromboli.StreamRequest{
 //	    Prompt: "Write a haiku about Go programming",
@@ -227,7 +242,7 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 //	    log.Fatal(err)
 //	}
 //
-// Using channel iteration:
+// # Channel Iteration
 //
 //	stream, _ := client.Stream(ctx, req)
 //	defer stream.Close()
@@ -236,7 +251,7 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 //	    fmt.Print(event.Data)
 //	}
 //
-// Continuing a conversation:
+// # Continuing a Conversation
 //
 //	// First interaction
 //	stream1, _ := client.Stream(ctx, &stromboli.StreamRequest{

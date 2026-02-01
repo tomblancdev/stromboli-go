@@ -3,6 +3,7 @@
 package e2e
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,6 +21,13 @@ func TestRun_E2E(t *testing.T) {
 		Prompt: "Hello, Claude! Please respond with a short greeting.",
 	})
 	require.NoError(t, err, "Run should succeed")
+
+	// Cleanup session after test
+	if result.SessionID != "" {
+		t.Cleanup(func() {
+			_ = client.DestroySession(context.Background(), result.SessionID)
+		})
+	}
 
 	// Verify response structure
 	assert.NotEmpty(t, result.ID, "ID should not be empty")
@@ -56,6 +64,13 @@ func TestRun_WithOptions_E2E(t *testing.T) {
 		},
 	})
 	require.NoError(t, err, "Run with options should succeed")
+
+	// Cleanup session after test
+	if result.SessionID != "" {
+		t.Cleanup(func() {
+			_ = client.DestroySession(context.Background(), result.SessionID)
+		})
+	}
 
 	// Verify response structure
 	assert.NotEmpty(t, result.ID, "ID should not be empty")
