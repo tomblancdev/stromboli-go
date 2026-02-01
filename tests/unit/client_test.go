@@ -472,6 +472,215 @@ func TestRun_WithOptions(t *testing.T) {
 	assert.True(t, result.IsSuccess())
 }
 
+// TestRun_WithJSONSchema tests Run with JSON schema for structured output.
+func TestRun_WithJSONSchema(t *testing.T) {
+	schema := `{"type":"object","required":["summary"],"properties":{"summary":{"type":"string"}}}`
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/run", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Claude options include JSONSchema
+		claude, ok := req["claude"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "json", claude["output_format"])
+
+		// Use JSONEq for robust JSON comparison (handles formatting differences)
+		actualSchema, ok := claude["json_schema"].(string)
+		require.True(t, ok)
+		assert.JSONEq(t, schema, actualSchema)
+
+		// Return mock response with structured output
+		resp := map[string]interface{}{
+			"id":         "run-json123",
+			"status":     "completed",
+			"output":     `{"summary":"Test completed successfully"}`,
+			"session_id": "sess-json789",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Summarize this text",
+		Claude: &stromboli.ClaudeOptions{
+			OutputFormat: "json",
+			JSONSchema:   schema,
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "run-json123", result.ID)
+	assert.Equal(t, "completed", result.Status)
+	assert.Contains(t, result.Output, "summary")
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_WithJSONSchema_ComplexSchema tests Run with a complex multi-line JSON schema.
+func TestRun_WithJSONSchema_ComplexSchema(t *testing.T) {
+	// Complex schema with nested types and arrays
+	schema := `{
+		"type": "object",
+		"required": ["items", "metadata"],
+		"properties": {
+			"items": {
+				"type": "array",
+				"items": {"type": "string"}
+			},
+			"metadata": {
+				"type": "object",
+				"properties": {
+					"count": {"type": "integer"},
+					"valid": {"type": "boolean"}
+				}
+			}
+		}
+	}`
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Claude options include JSONSchema
+		claude, ok := req["claude"].(map[string]interface{})
+		require.True(t, ok)
+
+		actualSchema, ok := claude["json_schema"].(string)
+		require.True(t, ok)
+		assert.JSONEq(t, schema, actualSchema)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-complex123",
+			"status": "completed",
+			"output": `{"items":["a","b"],"metadata":{"count":2,"valid":true}}`,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "List items",
+		Claude: &stromboli.ClaudeOptions{
+			OutputFormat: "json",
+			JSONSchema:   schema,
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_WithJSONSchema_NoOutputFormat tests that JSONSchema works without explicit OutputFormat.
+func TestRun_WithJSONSchema_NoOutputFormat(t *testing.T) {
+	schema := `{"type":"object","properties":{"result":{"type":"string"}}}`
+
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Claude options include JSONSchema but no output_format
+		claude, ok := req["claude"].(map[string]interface{})
+		require.True(t, ok)
+
+		actualSchema, ok := claude["json_schema"].(string)
+		require.True(t, ok)
+		assert.JSONEq(t, schema, actualSchema)
+
+		// output_format should not be set (or empty)
+		_, hasOutputFormat := claude["output_format"]
+		assert.False(t, hasOutputFormat, "output_format should not be set when not provided")
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-noformat123",
+			"status": "completed",
+			"output": `{"result":"success"}`,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Do something",
+		Claude: &stromboli.ClaudeOptions{
+			JSONSchema: schema,
+			// Note: OutputFormat intentionally not set
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_WithEmptyJSONSchema tests that empty JSONSchema is omitted from the request.
+func TestRun_WithEmptyJSONSchema(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Claude options exist but json_schema is not present
+		claude, ok := req["claude"].(map[string]interface{})
+		require.True(t, ok)
+
+		// json_schema should not be present when empty
+		_, hasJSONSchema := claude["json_schema"]
+		assert.False(t, hasJSONSchema, "json_schema should be omitted when empty")
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-empty123",
+			"status": "completed",
+			"output": "Plain text response",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Do something",
+		Claude: &stromboli.ClaudeOptions{
+			Model:      stromboli.ModelHaiku,
+			JSONSchema: "", // Explicitly empty
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
 // TestRun_EmptyPrompt tests that Run returns an error when prompt is empty.
 func TestRun_EmptyPrompt(t *testing.T) {
 	// Arrange
