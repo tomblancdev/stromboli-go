@@ -1,0 +1,10 @@
+# Stromboli Go SDK Configuration
+
+# Target Stromboli API version
+apiVersion: "0.3.0-alpha"
+
+# Compatible API version range (semver)
+apiVersionRange: ">=0.3.0-alpha <0.4.0"
+
+# OpenAPI spec URL template (derived from apiVersion)
+# https://raw.githubusercontent.com/tomblancdev/stromboli/v{apiVersion}/docs/swagger/swagger.yaml

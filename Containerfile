@@ -1,0 +1,16 @@
+FROM docker.io/golang:1.23-alpine
+
+WORKDIR /app
+
+# Install tools
+RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest && \
+    go install github.com/go-swagger/go-swagger/cmd/swagger@v0.31.0
+
+# Copy module files first for caching
+COPY go.mod go.sum* ./
+RUN go mod download || true
+
+# Copy source
+COPY . .
+
+CMD ["go", "test", "./..."]
