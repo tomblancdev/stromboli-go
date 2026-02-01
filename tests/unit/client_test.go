@@ -1777,11 +1777,11 @@ func TestStream_Success(t *testing.T) {
 		require.True(t, ok, "ResponseWriter should be a Flusher")
 
 		// Send events
-		fmt.Fprintf(w, "data: Hello\n\n")
+		_, _ = fmt.Fprintf(w, "data: Hello\n\n")
 		flusher.Flush()
-		fmt.Fprintf(w, "data: World\n\n")
+		_, _ = fmt.Fprintf(w, "data: World\n\n")
 		flusher.Flush()
-		fmt.Fprintf(w, "event: done\ndata: \n\n")
+		_, _ = fmt.Fprintf(w, "event: done\ndata: \n\n")
 		flusher.Flush()
 	}))
 	defer server.Close()
@@ -1796,7 +1796,7 @@ func TestStream_Success(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	require.NotNil(t, stream)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Collect events
 	var events []*stromboli.StreamEvent
@@ -1822,7 +1822,7 @@ func TestStream_WithOptions(t *testing.T) {
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
-		fmt.Fprintf(w, "data: OK\n\n")
+		_, _ = fmt.Fprintf(w, "data: OK\n\n")
 	}))
 	defer server.Close()
 
@@ -1837,7 +1837,7 @@ func TestStream_WithOptions(t *testing.T) {
 
 	// Assert
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	require.True(t, stream.Next())
 	assert.Equal(t, "OK", stream.Event().Data)
@@ -1916,7 +1916,7 @@ func TestStream_EventsChannel(t *testing.T) {
 
 		flusher := w.(http.Flusher)
 		for i := 1; i <= 3; i++ {
-			fmt.Fprintf(w, "data: Line %d\n\n", i)
+			_, _ = fmt.Fprintf(w, "data: Line %d\n\n", i)
 			flusher.Flush()
 		}
 	}))
@@ -1929,7 +1929,7 @@ func TestStream_EventsChannel(t *testing.T) {
 		Prompt: "Test",
 	})
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Collect events via channel
 	events := make([]*stromboli.StreamEvent, 0, 3)
@@ -1953,10 +1953,10 @@ func TestStream_MultilineData(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 
 		// Send multiline data (each line prefixed with "data:")
-		fmt.Fprintf(w, "data: Line 1\n")
-		fmt.Fprintf(w, "data: Line 2\n")
-		fmt.Fprintf(w, "data: Line 3\n")
-		fmt.Fprintf(w, "\n") // End of event
+		_, _ = fmt.Fprintf(w, "data: Line 1\n")
+		_, _ = fmt.Fprintf(w, "data: Line 2\n")
+		_, _ = fmt.Fprintf(w, "data: Line 3\n")
+		_, _ = fmt.Fprintf(w, "\n") // End of event
 	}))
 	defer server.Close()
 
@@ -1967,7 +1967,7 @@ func TestStream_MultilineData(t *testing.T) {
 		Prompt: "Test",
 	})
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Assert
 	require.True(t, stream.Next())
@@ -1981,10 +1981,10 @@ func TestStream_WithEventType(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 
-		fmt.Fprintf(w, "event: message\n")
-		fmt.Fprintf(w, "id: 123\n")
-		fmt.Fprintf(w, "data: Hello\n")
-		fmt.Fprintf(w, "\n")
+		_, _ = fmt.Fprintf(w, "event: message\n")
+		_, _ = fmt.Fprintf(w, "id: 123\n")
+		_, _ = fmt.Fprintf(w, "data: Hello\n")
+		_, _ = fmt.Fprintf(w, "\n")
 	}))
 	defer server.Close()
 
@@ -1995,7 +1995,7 @@ func TestStream_WithEventType(t *testing.T) {
 		Prompt: "Test",
 	})
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Assert
 	require.True(t, stream.Next())
@@ -2014,7 +2014,7 @@ func TestStream_ContextCancellation(t *testing.T) {
 
 		flusher := w.(http.Flusher)
 		// Send one event then wait
-		fmt.Fprintf(w, "data: First\n\n")
+		_, _ = fmt.Fprintf(w, "data: First\n\n")
 		flusher.Flush()
 
 		// Wait for context cancellation (this would block forever otherwise)
@@ -2030,7 +2030,7 @@ func TestStream_ContextCancellation(t *testing.T) {
 		Prompt: "Test",
 	})
 	require.NoError(t, err)
-	defer stream.Close()
+	defer func() { _ = stream.Close() }()
 
 	// Get first event
 	require.True(t, stream.Next())

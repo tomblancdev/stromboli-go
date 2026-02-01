@@ -341,7 +341,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		// Limit body read to prevent memory exhaustion from large error responses
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 		return nil, newError(
@@ -355,7 +355,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Verify content type
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(contentType, "text/event-stream") {
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		return nil, newError(
 			"INVALID_RESPONSE",
 			fmt.Sprintf("unexpected content type: %s", contentType),

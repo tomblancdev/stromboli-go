@@ -6,7 +6,7 @@ WORKDIR /app
 RUN apk add --no-cache nodejs npm
 
 # Install Go tools
-RUN go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest && \
+RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && \
     go install github.com/go-swagger/go-swagger/cmd/swagger@v0.31.0 && \
     go install github.com/vektra/mockery/v2@latest
 
