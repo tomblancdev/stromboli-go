@@ -10,7 +10,7 @@ import (
 // Options are passed to [NewClient] to customize the client behavior.
 // Multiple options can be combined:
 //
-//	client := stromboli.NewClient("http://localhost:8585",
+//	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
 //	    stromboli.WithRetries(3),
 //	)
@@ -22,13 +22,13 @@ type Option func(*Client)
 //
 // The timeout applies to the entire request lifecycle, including
 // connection establishment, request sending, and response reading.
-// A timeout of zero means no timeout.
+// A timeout of zero means no timeout. Negative values are treated as zero.
 //
 // Default: 30 seconds.
 //
 // Example:
 //
-//	client := stromboli.NewClient(url,
+//	client, err := stromboli.NewClient(url,
 //	    stromboli.WithTimeout(5*time.Minute), // Long timeout for slow operations
 //	)
 //
@@ -39,30 +39,33 @@ type Option func(*Client)
 //	result, err := client.Health(ctx)
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
+		if d < 0 {
+			d = 0
+		}
 		c.timeout = d
 	}
 }
 
 // WithRetries sets the maximum number of retry attempts for failed requests.
 //
-// Retries are only attempted for transient errors (network errors,
-// 5xx responses). Client errors (4xx responses) are not retried.
+// NOTE: Retry logic is planned but not yet implemented in v0.x.
+// This option is reserved for future use. Implement retry logic in your
+// application or use a library like hashicorp/go-retryablehttp.
 //
-// The retry delay uses exponential backoff with jitter:
-//   - First retry: 100-200ms
-//   - Second retry: 200-400ms
-//   - Third retry: 400-800ms
-//   - And so on...
+// Negative values are treated as zero.
 //
 // Default: 0 (no retries).
 //
 // Example:
 //
-//	client := stromboli.NewClient(url,
+//	client, err := stromboli.NewClient(url,
 //	    stromboli.WithRetries(3), // Retry up to 3 times
 //	)
 func WithRetries(n int) Option {
 	return func(c *Client) {
+		if n < 0 {
+			n = 0
+		}
 		c.maxRetries = n
 	}
 }

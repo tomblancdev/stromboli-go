@@ -39,7 +39,7 @@ type HealthResponse struct {
 //	    log.Println("API is unhealthy!")
 //	}
 func (h *HealthResponse) IsHealthy() bool {
-	return h.Status == "ok"
+	return h.Status == StatusOK
 }
 
 // ComponentHealth represents the health status of an individual component.
@@ -63,7 +63,7 @@ type ComponentHealth struct {
 
 // IsHealthy returns true if the component status is "ok".
 func (c *ComponentHealth) IsHealthy() bool {
-	return c.Status == "ok"
+	return c.Status == StatusOK
 }
 
 // ClaudeStatus represents the Claude configuration status.
@@ -404,6 +404,11 @@ func (j *Job) IsFailed() bool {
 // IsCancelled returns true if the job was cancelled.
 func (j *Job) IsCancelled() bool {
 	return j.Status == JobStatusCancelled
+}
+
+// IsPending returns true if the job is pending (queued but not yet started).
+func (j *Job) IsPending() bool {
+	return j.Status == JobStatusPending
 }
 
 // CrashInfo contains details about a job crash.
