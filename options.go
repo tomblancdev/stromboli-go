@@ -97,7 +97,10 @@ func WithRetries(n int) Option {
 //	)
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *Client) {
-		c.httpClient = httpClient
+		if httpClient != nil {
+			c.httpClient = httpClient
+		}
+		// If nil, keep the default http.DefaultClient
 	}
 }
 

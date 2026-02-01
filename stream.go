@@ -7,8 +7,14 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
+	"sync/atomic"
 )
+
+// maxErrorBodySize limits the size of error response bodies to prevent
+// memory exhaustion from malicious or misconfigured servers.
+const maxErrorBodySize = 4096
 
 // StreamRequest represents a request for streaming Claude output.
 //
@@ -66,7 +72,7 @@ type Stream struct {
 	reader  *bufio.Reader
 	current *StreamEvent
 	err     error
-	closed  bool
+	closed  atomic.Bool
 }
 
 // Next advances to the next event in the stream.
@@ -81,7 +87,7 @@ type Stream struct {
 //	    fmt.Print(event.Data)
 //	}
 func (s *Stream) Next() bool {
-	if s.closed || s.err != nil {
+	if s.closed.Load() || s.err != nil {
 		return false
 	}
 
@@ -113,18 +119,23 @@ func (s *Stream) Err() error {
 
 // Close closes the stream and releases resources.
 //
-// Always call Close when done with the stream, preferably with defer:
+// Always call Close when done with the stream, preferably with defer.
+// This is required even if [Stream.Next] returns false due to an error,
+// as the underlying HTTP response body must be closed to release resources.
+//
+// Close is safe to call multiple times and is thread-safe.
+//
+// Example:
 //
 //	stream, err := client.Stream(ctx, req)
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
-//	defer stream.Close()
+//	defer stream.Close() // Always close, even on errors
 func (s *Stream) Close() error {
-	if s.closed {
-		return nil
+	if s.closed.Swap(true) {
+		return nil // Already closed
 	}
-	s.closed = true
 	if s.resp != nil && s.resp.Body != nil {
 		return s.resp.Body.Close()
 	}
@@ -154,7 +165,10 @@ func (s *Stream) Events() <-chan *StreamEvent {
 			close(ch)
 		}()
 		for s.Next() {
-			ch <- s.current
+			// Copy the event to avoid race condition when consumer
+			// reads while we iterate to the next event.
+			event := *s.current
+			ch <- &event
 		}
 	}()
 	return ch
@@ -188,10 +202,15 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 		}
 
 		// Parse SSE field
+		// Note: SSE spec says "retry:" sets reconnection time, but we intentionally
+		// ignore it as this client doesn't implement auto-reconnection.
 		switch {
 		case strings.HasPrefix(line, "data:"):
-			data := strings.TrimPrefix(line, "data:")
-			data = strings.TrimPrefix(data, " ") // Optional space after colon
+			// Try with space first, then without
+			data, found := strings.CutPrefix(line, "data: ")
+			if !found {
+				data, _ = strings.CutPrefix(line, "data:")
+			}
 			if hasData {
 				event.Data += "\n" + data
 			} else {
@@ -199,13 +218,19 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 			}
 			hasData = true
 		case strings.HasPrefix(line, "event:"):
-			event.Type = strings.TrimPrefix(line, "event:")
-			event.Type = strings.TrimPrefix(event.Type, " ")
+			var found bool
+			event.Type, found = strings.CutPrefix(line, "event: ")
+			if !found {
+				event.Type, _ = strings.CutPrefix(line, "event:")
+			}
 		case strings.HasPrefix(line, "id:"):
-			event.ID = strings.TrimPrefix(line, "id:")
-			event.ID = strings.TrimPrefix(event.ID, " ")
+			var found bool
+			event.ID, found = strings.CutPrefix(line, "id: ")
+			if !found {
+				event.ID, _ = strings.CutPrefix(line, "id:")
+			}
 		}
-		// Ignore "retry:" and comments (lines starting with ":")
+		// Ignore "retry:" (reconnection time) and comments (lines starting with ":")
 	}
 }
 
@@ -278,7 +303,8 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	if err != nil {
 		return nil, newError("INVALID_URL", "invalid base URL", 0, err)
 	}
-	u.Path = "/run/stream"
+	// Preserve any base path in the URL (e.g., /api/v1)
+	u.Path = path.Join(u.Path, "run", "stream")
 
 	query := u.Query()
 	query.Set("prompt", req.Prompt)
@@ -302,9 +328,9 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	httpReq.Header.Set("Connection", "keep-alive")
 	httpReq.Header.Set("User-Agent", c.userAgent)
 
-	// Add auth if token is set
-	if c.token != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.token)
+	// Add auth if token is set (thread-safe access)
+	if token := c.getToken(); token != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	// Execute request
@@ -316,7 +342,8 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
 		defer resp.Body.Close()
-		body, _ := io.ReadAll(resp.Body)
+		// Limit body read to prevent memory exhaustion from large error responses
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
 		return nil, newError(
 			"STREAM_ERROR",
 			fmt.Sprintf("stream request failed: %s", string(body)),

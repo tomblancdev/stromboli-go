@@ -2,6 +2,7 @@ package stromboli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -122,6 +123,10 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	}
 	if u.Host == "" {
 		return nil, fmt.Errorf("stromboli: base URL must include host")
+	}
+	// Validate scheme (only http and https are supported)
+	if u.Scheme != "" && u.Scheme != "http" && u.Scheme != "https" {
+		return nil, fmt.Errorf("stromboli: unsupported URL scheme %q (use http or https)", u.Scheme)
 	}
 
 	c := &Client{
@@ -958,18 +963,19 @@ func (c *Client) handleError(err error, message string) error {
 	}
 
 	// Check for runtime API errors from go-swagger
-	if apiErr, ok := err.(*runtime.APIError); ok {
+	var apiErr *runtime.APIError
+	if errors.As(err, &apiErr) {
 		return c.handleAPIError(apiErr, message)
 	}
 
 	// Check for context cancellation
-	if err == context.Canceled {
+	if errors.Is(err, context.Canceled) {
 		return wrapError(err, "CANCELLED", "request was cancelled", 0)
 	}
 
 	// Check for context deadline exceeded
-	if err == context.DeadlineExceeded {
-		return wrapError(err, "TIMEOUT", "request timed out", 408)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return wrapError(err, "TIMEOUT", "request timed out", http.StatusRequestTimeout)
 	}
 
 	// Generic error
@@ -980,22 +986,23 @@ func (c *Client) handleError(err error, message string) error {
 func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error {
 	status := apiErr.Code
 
-	switch {
-	case status == 400:
+	switch status {
+	case http.StatusBadRequest:
 		return newError("BAD_REQUEST", message, status, apiErr)
-	case status == 401:
+	case http.StatusUnauthorized:
 		return newError("UNAUTHORIZED", "authentication required", status, apiErr)
-	case status == 403:
+	case http.StatusForbidden:
 		return newError("FORBIDDEN", "access denied", status, apiErr)
-	case status == 404:
+	case http.StatusNotFound:
 		return newError("NOT_FOUND", "resource not found", status, apiErr)
-	case status == 408:
+	case http.StatusRequestTimeout:
 		return newError("TIMEOUT", "request timed out", status, apiErr)
-	case status == 429:
+	case http.StatusTooManyRequests:
 		return newError("RATE_LIMITED", "too many requests", status, apiErr)
-	case status >= 500:
-		return newError("INTERNAL", "server error", status, apiErr)
 	default:
+		if status >= http.StatusInternalServerError {
+			return newError("INTERNAL", "server error", status, apiErr)
+		}
 		return newError("REQUEST_FAILED", message, status, apiErr)
 	}
 }
@@ -1033,6 +1040,19 @@ func (c *Client) SetToken(token string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = token
+}
+
+// ClearToken removes the Bearer token from the client.
+//
+// This is equivalent to calling SetToken("") but more explicit.
+// Use this after [Client.Logout] to clear local state.
+//
+// Example:
+//
+//	client.Logout(ctx)
+//	client.ClearToken()
+func (c *Client) ClearToken() {
+	c.SetToken("")
 }
 
 // GetToken obtains JWT tokens using a client ID.

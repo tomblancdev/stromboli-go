@@ -233,6 +233,26 @@ func TestNewClient_MissingHost(t *testing.T) {
 	assert.Contains(t, err.Error(), "must include host")
 }
 
+// TestNewClient_InvalidScheme tests NewClient with unsupported URL schemes.
+func TestNewClient_InvalidScheme(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"ftp scheme", "ftp://example.com"},
+		{"ws scheme", "ws://example.com"},
+		{"custom scheme", "custom://example.com"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := stromboli.NewClient(tt.url)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "unsupported URL scheme")
+		})
+	}
+}
+
 // TestNewClient_ValidURL tests NewClient with various valid URLs.
 func TestNewClient_ValidURL(t *testing.T) {
 	tests := []struct {

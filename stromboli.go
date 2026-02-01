@@ -27,7 +27,10 @@
 //
 //	func main() {
 //	    // Create a new client
-//	    client := stromboli.NewClient("http://localhost:8585")
+//	    client, err := stromboli.NewClient("http://localhost:8585")
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
 //
 //	    // Check API health
 //	    health, err := client.Health(context.Background())
@@ -41,11 +44,13 @@
 //
 // The client can be configured using functional options:
 //
-//	client := stromboli.NewClient("http://localhost:8585",
+//	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
-//	    stromboli.WithRetries(3),
 //	    stromboli.WithHTTPClient(customHTTPClient),
 //	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
 // # Error Handling
 //
