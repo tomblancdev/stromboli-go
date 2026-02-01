@@ -571,6 +571,62 @@ for _, name := range secrets {
 
 ---
 
+## Version Compatibility
+
+The SDK includes runtime version checking to ensure compatibility with the Stromboli API server.
+
+### Quick Check
+
+```go
+health, _ := client.Health(ctx)
+if !stromboli.IsCompatible(health.Version) {
+    log.Printf("Warning: Server %s may not be compatible with SDK", health.Version)
+}
+```
+
+### Detailed Check
+
+```go
+health, _ := client.Health(ctx)
+result := stromboli.CheckCompatibility(health.Version)
+
+switch result.Status {
+case stromboli.Compatible:
+    fmt.Printf("✅ Server %s is compatible\n", result.ServerVersion)
+case stromboli.Incompatible:
+    fmt.Printf("⚠️  %s\n", result.Message)
+case stromboli.Unknown:
+    fmt.Printf("❓ Could not determine: %s\n", result.Message)
+}
+```
+
+### Fail Fast
+
+```go
+func main() {
+    client := stromboli.NewClient(url)
+    health, err := client.Health(ctx)
+    if err != nil {
+        log.Fatal(err)
+    }
+
+    // Panics if incompatible
+    stromboli.MustBeCompatible(health.Version)
+
+    // Continue with compatible server...
+}
+```
+
+### Version Constants
+
+| Constant | Description |
+|----------|-------------|
+| `stromboli.Version` | SDK version (e.g., "0.1.0") |
+| `stromboli.APIVersion` | Target API version (e.g., "0.3.0-alpha") |
+| `stromboli.APIVersionRange` | Supported range (e.g., ">=0.3.0-alpha <0.4.0") |
+
+---
+
 ## Error Handling
 
 The SDK uses typed errors for common failure cases:

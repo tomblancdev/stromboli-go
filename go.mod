@@ -3,6 +3,7 @@ module github.com/tomblancdev/stromboli-go
 go 1.23
 
 require (
+	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/go-openapi/errors v0.22.0
 	github.com/go-openapi/runtime v0.28.0
 	github.com/go-openapi/strfmt v0.23.0
