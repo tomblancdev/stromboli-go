@@ -61,7 +61,10 @@ import (
 
 func main() {
     // Create a client
-    client := stromboli.NewClient("http://localhost:8585")
+    client, err := stromboli.NewClient("http://localhost:8585")
+    if err != nil {
+        log.Fatal(err)
+    }
 
     // Execute Claude synchronously
     result, err := client.Run(context.Background(), &stromboli.RunRequest{
@@ -148,19 +151,25 @@ result2, _ := client.Run(ctx, &stromboli.RunRequest{
 Create a client with default settings:
 
 ```go
-client := stromboli.NewClient("http://localhost:8585")
+client, err := stromboli.NewClient("http://localhost:8585")
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 Configure with options:
 
 ```go
-client := stromboli.NewClient("http://localhost:8585",
+client, err := stromboli.NewClient("http://localhost:8585",
     stromboli.WithTimeout(5*time.Minute),     // Request timeout
     stromboli.WithRetries(3),                  // Retry on transient errors
     stromboli.WithToken("your-jwt-token"),     // Pre-set auth token
     stromboli.WithUserAgent("my-app/1.0.0"),   // Custom User-Agent
     stromboli.WithHTTPClient(customClient),    // Custom HTTP client
 )
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 #### Options Reference
@@ -604,7 +613,10 @@ case stromboli.Unknown:
 
 ```go
 func main() {
-    client := stromboli.NewClient(url)
+    client, err := stromboli.NewClient(url)
+    if err != nil {
+        log.Fatal(err)
+    }
     health, err := client.Health(ctx)
     if err != nil {
         log.Fatal(err)
@@ -699,7 +711,11 @@ import (
 )
 
 func main() {
-    client := stromboli.NewClient("http://localhost:8585")
+    client, err := stromboli.NewClient("http://localhost:8585")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to create client: %v\n", err)
+        os.Exit(1)
+    }
     ctx := context.Background()
 
     var sessionID string
@@ -756,7 +772,11 @@ import (
 )
 
 func main() {
-    client := stromboli.NewClient("http://localhost:8585")
+    client, err := stromboli.NewClient("http://localhost:8585")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "Failed to create client: %v\n", err)
+        os.Exit(1)
+    }
 
     stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
         Prompt: "Write a short story about a robot learning to paint",
@@ -797,7 +817,10 @@ import (
 )
 
 func main() {
-    client := stromboli.NewClient("http://localhost:8585")
+    client, err := stromboli.NewClient("http://localhost:8585")
+    if err != nil {
+        panic(err)
+    }
     ctx := context.Background()
 
     // Start async job

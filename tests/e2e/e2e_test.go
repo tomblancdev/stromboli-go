@@ -55,10 +55,15 @@ func skipIfMock(t *testing.T, reason string) {
 }
 
 // newTestClient creates a client configured for E2E testing.
+// Panics if client creation fails (indicates test setup bug).
 func newTestClient() *stromboli.Client {
-	return stromboli.NewClient(getBaseURL(),
+	client, err := stromboli.NewClient(getBaseURL(),
 		stromboli.WithTimeout(30*time.Second),
 	)
+	if err != nil {
+		panic("failed to create test client: " + err.Error())
+	}
+	return client
 }
 
 // newTestContext creates a context with a reasonable timeout for E2E tests.

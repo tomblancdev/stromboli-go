@@ -3,9 +3,11 @@ package unit
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -58,7 +60,8 @@ func TestHealth_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act: Create client and call Health
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	health, err := client.Health(context.Background())
 
 	// Assert
@@ -90,7 +93,8 @@ func TestHealth_Unhealthy(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	health, err := client.Health(context.Background())
 
 	// Assert
@@ -111,7 +115,8 @@ func TestHealth_ServerError(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	health, err := client.Health(context.Background())
 
 	// Assert
@@ -137,7 +142,8 @@ func TestHealth_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // Cancel immediately
 
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	health, err := client.Health(ctx)
 
 	// Assert
@@ -161,7 +167,8 @@ func TestClaudeStatus_Configured(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	status, err := client.ClaudeStatus(context.Background())
 
 	// Assert
@@ -184,7 +191,8 @@ func TestClaudeStatus_NotConfigured(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	status, err := client.ClaudeStatus(context.Background())
 
 	// Assert
@@ -200,14 +208,138 @@ func TestNewClient_Options(t *testing.T) {
 
 	customHTTPClient := &http.Client{}
 
-	client := stromboli.NewClient("http://localhost:8585",
+	client, err := stromboli.NewClient("http://localhost:8585",
 		stromboli.WithTimeout(60),
 		stromboli.WithRetries(3),
 		stromboli.WithHTTPClient(customHTTPClient),
 		stromboli.WithUserAgent("test-agent/1.0"),
 	)
+	require.NoError(t, err)
 
 	assert.NotNil(t, client)
+}
+
+// TestNewClient_InvalidURL tests NewClient with an invalid URL.
+func TestNewClient_InvalidURL(t *testing.T) {
+	_, err := stromboli.NewClient("://invalid")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid base URL")
+}
+
+// TestNewClient_MissingHost tests NewClient with a URL missing the host.
+func TestNewClient_MissingHost(t *testing.T) {
+	_, err := stromboli.NewClient("/just/a/path")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must include host")
+}
+
+// TestNewClient_ValidURL tests NewClient with various valid URLs.
+func TestNewClient_ValidURL(t *testing.T) {
+	tests := []struct {
+		name string
+		url  string
+	}{
+		{"localhost", "http://localhost:8585"},
+		{"https", "https://stromboli.example.com"},
+		{"ip address", "http://192.168.1.1:8585"},
+		{"with path", "http://localhost:8585/api/v1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client, err := stromboli.NewClient(tt.url)
+			require.NoError(t, err)
+			assert.NotNil(t, client)
+		})
+	}
+}
+
+// TestClient_ConcurrentTokenAccess tests that SetToken is thread-safe.
+// Run with -race flag to detect data races.
+func TestClient_ConcurrentTokenAccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Return 401 for any request - we're just testing that it doesn't race
+		w.WriteHeader(http.StatusUnauthorized)
+		mustEncode(w, map[string]interface{}{
+			"error": "unauthorized",
+		})
+	}))
+	defer server.Close()
+
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(2)
+		go func(i int) {
+			defer wg.Done()
+			client.SetToken(fmt.Sprintf("token-%d", i))
+		}(i)
+		go func() {
+			defer wg.Done()
+			// ValidateToken reads the token and makes a request
+			_, _ = client.ValidateToken(context.Background())
+		}()
+	}
+	wg.Wait()
+	// Test passes if no race detected (run with -race flag)
+}
+
+// TestError_Is tests the Error.Is implementation.
+func TestError_Is(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      *stromboli.Error
+		target   error
+		expected bool
+	}{
+		{
+			name:     "same code matches",
+			err:      &stromboli.Error{Code: "NOT_FOUND", Message: "specific message"},
+			target:   stromboli.ErrNotFound,
+			expected: true,
+		},
+		{
+			name:     "different code does not match",
+			err:      &stromboli.Error{Code: "NOT_FOUND"},
+			target:   stromboli.ErrTimeout,
+			expected: false,
+		},
+		{
+			name:     "non-Error target does not match",
+			err:      &stromboli.Error{Code: "NOT_FOUND"},
+			target:   fmt.Errorf("some error"),
+			expected: false,
+		},
+		{
+			name:     "nil target does not match",
+			err:      &stromboli.Error{Code: "NOT_FOUND"},
+			target:   nil,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := errors.Is(tt.err, tt.target)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+// TestError_Is_WithWrappedError tests errors.Is with wrapped errors.
+func TestError_Is_WithWrappedError(t *testing.T) {
+	// Create an error with a cause
+	wrappedErr := &stromboli.Error{
+		Code:    "NOT_FOUND",
+		Message: "resource not found",
+		Cause:   fmt.Errorf("underlying error"),
+	}
+
+	// errors.Is should match the error code
+	assert.True(t, errors.Is(wrappedErr, stromboli.ErrNotFound))
+	assert.False(t, errors.Is(wrappedErr, stromboli.ErrTimeout))
 }
 
 // ----------------------------------------------------------------------------
@@ -247,7 +379,8 @@ func TestRun_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.Run(context.Background(), &stromboli.RunRequest{
 		Prompt: "Hello, Claude!",
 	})
@@ -297,7 +430,8 @@ func TestRun_WithOptions(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.Run(context.Background(), &stromboli.RunRequest{
 		Prompt:  "Review this code",
 		Workdir: "/workspace",
@@ -321,7 +455,8 @@ func TestRun_WithOptions(t *testing.T) {
 // TestRun_EmptyPrompt tests that Run returns an error when prompt is empty.
 func TestRun_EmptyPrompt(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	result, err := client.Run(context.Background(), &stromboli.RunRequest{
@@ -340,7 +475,8 @@ func TestRun_EmptyPrompt(t *testing.T) {
 // TestRun_NilRequest tests that Run returns an error when request is nil.
 func TestRun_NilRequest(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	result, err := client.Run(context.Background(), nil)
@@ -369,7 +505,8 @@ func TestRun_ExecutionError(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.Run(context.Background(), &stromboli.RunRequest{
 		Prompt: "Do something complex",
 	})
@@ -391,7 +528,8 @@ func TestRun_ServerError(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.Run(context.Background(), &stromboli.RunRequest{
 		Prompt: "Hello",
 	})
@@ -431,7 +569,8 @@ func TestRunAsync_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.RunAsync(context.Background(), &stromboli.RunRequest{
 		Prompt: "Analyze this codebase",
 	})
@@ -463,7 +602,8 @@ func TestRunAsync_WithWebhook(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	result, err := client.RunAsync(context.Background(), &stromboli.RunRequest{
 		Prompt:     "Long running task",
 		WebhookURL: "https://example.com/webhook",
@@ -477,7 +617,8 @@ func TestRunAsync_WithWebhook(t *testing.T) {
 // TestRunAsync_EmptyPrompt tests that RunAsync returns an error when prompt is empty.
 func TestRunAsync_EmptyPrompt(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	result, err := client.RunAsync(context.Background(), &stromboli.RunRequest{
@@ -496,7 +637,8 @@ func TestRunAsync_EmptyPrompt(t *testing.T) {
 // TestRunAsync_NilRequest tests that RunAsync returns an error when request is nil.
 func TestRunAsync_NilRequest(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	result, err := client.RunAsync(context.Background(), nil)
@@ -550,7 +692,8 @@ func TestListJobs_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	jobs, err := client.ListJobs(context.Background())
 
 	// Assert
@@ -587,7 +730,8 @@ func TestListJobs_Empty(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	jobs, err := client.ListJobs(context.Background())
 
 	// Assert
@@ -618,7 +762,8 @@ func TestGetJob_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	job, err := client.GetJob(context.Background(), "job-abc123")
 
 	// Assert
@@ -652,7 +797,8 @@ func TestGetJob_Failed(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	job, err := client.GetJob(context.Background(), "job-failed")
 
 	// Assert
@@ -678,7 +824,8 @@ func TestGetJob_NotFound(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	job, err := client.GetJob(context.Background(), "invalid-id")
 
 	// Assert
@@ -694,7 +841,8 @@ func TestGetJob_NotFound(t *testing.T) {
 // TestGetJob_EmptyID tests GetJob with an empty job ID.
 func TestGetJob_EmptyID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	job, err := client.GetJob(context.Background(), "")
@@ -723,8 +871,9 @@ func TestCancelJob_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
-	err := client.CancelJob(context.Background(), "job-cancel123")
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.CancelJob(context.Background(), "job-cancel123")
 
 	// Assert
 	require.NoError(t, err)
@@ -740,8 +889,9 @@ func TestCancelJob_NotFound(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
-	err := client.CancelJob(context.Background(), "invalid-id")
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.CancelJob(context.Background(), "invalid-id")
 
 	// Assert
 	require.Error(t, err)
@@ -755,10 +905,11 @@ func TestCancelJob_NotFound(t *testing.T) {
 // TestCancelJob_EmptyID tests CancelJob with an empty job ID.
 func TestCancelJob_EmptyID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
-	err := client.CancelJob(context.Background(), "")
+	err = client.CancelJob(context.Background(), "")
 
 	// Assert
 	require.Error(t, err)
@@ -794,7 +945,8 @@ func TestListSessions_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	sessions, err := client.ListSessions(context.Background())
 
 	// Assert
@@ -818,7 +970,8 @@ func TestListSessions_Empty(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	sessions, err := client.ListSessions(context.Background())
 
 	// Assert
@@ -841,8 +994,9 @@ func TestDestroySession_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
-	err := client.DestroySession(context.Background(), "sess-abc123")
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.DestroySession(context.Background(), "sess-abc123")
 
 	// Assert
 	require.NoError(t, err)
@@ -851,10 +1005,11 @@ func TestDestroySession_Success(t *testing.T) {
 // TestDestroySession_EmptyID tests DestroySession with an empty session ID.
 func TestDestroySession_EmptyID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
-	err := client.DestroySession(context.Background(), "")
+	err = client.DestroySession(context.Background(), "")
 
 	// Assert
 	require.Error(t, err)
@@ -899,7 +1054,8 @@ func TestGetMessages_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	messages, err := client.GetMessages(context.Background(), "sess-abc123", nil)
 
 	// Assert
@@ -937,7 +1093,8 @@ func TestGetMessages_WithPagination(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	messages, err := client.GetMessages(context.Background(), "sess-abc123", &stromboli.GetMessagesOptions{
 		Limit:  25,
 		Offset: 50,
@@ -954,7 +1111,8 @@ func TestGetMessages_WithPagination(t *testing.T) {
 // TestGetMessages_EmptySessionID tests GetMessages with an empty session ID.
 func TestGetMessages_EmptySessionID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	messages, err := client.GetMessages(context.Background(), "", nil)
@@ -995,7 +1153,8 @@ func TestGetMessage_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	msg, err := client.GetMessage(context.Background(), "sess-abc123", "msg-001")
 
 	// Assert
@@ -1011,7 +1170,8 @@ func TestGetMessage_Success(t *testing.T) {
 // TestGetMessage_EmptySessionID tests GetMessage with an empty session ID.
 func TestGetMessage_EmptySessionID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	msg, err := client.GetMessage(context.Background(), "", "msg-001")
@@ -1028,7 +1188,8 @@ func TestGetMessage_EmptySessionID(t *testing.T) {
 // TestGetMessage_EmptyMessageID tests GetMessage with an empty message ID.
 func TestGetMessage_EmptyMessageID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	msg, err := client.GetMessage(context.Background(), "sess-abc123", "")
@@ -1067,7 +1228,8 @@ func TestGetToken_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	tokens, err := client.GetToken(context.Background(), "my-client-id")
 
 	// Assert
@@ -1081,7 +1243,8 @@ func TestGetToken_Success(t *testing.T) {
 // TestGetToken_EmptyClientID tests GetToken with an empty client ID.
 func TestGetToken_EmptyClientID(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	tokens, err := client.GetToken(context.Background(), "")
@@ -1116,7 +1279,8 @@ func TestRefreshToken_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	tokens, err := client.RefreshToken(context.Background(), "old_refresh_token")
 
 	// Assert
@@ -1129,7 +1293,8 @@ func TestRefreshToken_Success(t *testing.T) {
 // TestRefreshToken_EmptyToken tests RefreshToken with an empty token.
 func TestRefreshToken_EmptyToken(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	tokens, err := client.RefreshToken(context.Background(), "")
@@ -1167,7 +1332,8 @@ func TestValidateToken_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	client, err := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	require.NoError(t, err)
 	validation, err := client.ValidateToken(context.Background())
 
 	// Assert
@@ -1180,7 +1346,8 @@ func TestValidateToken_Success(t *testing.T) {
 // TestValidateToken_NoToken tests ValidateToken without a token set.
 func TestValidateToken_NoToken(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	validation, err := client.ValidateToken(context.Background())
@@ -1217,7 +1384,8 @@ func TestLogout_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	client, err := stromboli.NewClient(server.URL, stromboli.WithToken("test-token-123"))
+	require.NoError(t, err)
 	result, err := client.Logout(context.Background())
 
 	// Assert
@@ -1229,7 +1397,8 @@ func TestLogout_Success(t *testing.T) {
 // TestLogout_NoToken tests Logout without a token set.
 func TestLogout_NoToken(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	result, err := client.Logout(context.Background())
@@ -1262,7 +1431,8 @@ func TestSetToken(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	client.SetToken("new-token-456")
 	validation, err := client.ValidateToken(context.Background())
 
@@ -1293,7 +1463,8 @@ func TestListSecrets_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	secrets, err := client.ListSecrets(context.Background())
 
 	// Assert
@@ -1317,7 +1488,8 @@ func TestListSecrets_Empty(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	secrets, err := client.ListSecrets(context.Background())
 
 	// Assert
@@ -1339,7 +1511,8 @@ func TestListSecrets_Error(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	secrets, err := client.ListSecrets(context.Background())
 
 	// Assert
@@ -1385,7 +1558,8 @@ func TestStream_Success(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt: "Hello",
 	})
@@ -1424,7 +1598,8 @@ func TestStream_WithOptions(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt:    "Test prompt",
 		Workdir:   "/workspace",
@@ -1442,7 +1617,8 @@ func TestStream_WithOptions(t *testing.T) {
 // TestStream_EmptyPrompt tests Stream with an empty prompt.
 func TestStream_EmptyPrompt(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
@@ -1461,7 +1637,8 @@ func TestStream_EmptyPrompt(t *testing.T) {
 // TestStream_NilRequest tests Stream with a nil request.
 func TestStream_NilRequest(t *testing.T) {
 	// Arrange
-	client := stromboli.NewClient("http://localhost:8585")
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
 
 	// Act
 	stream, err := client.Stream(context.Background(), nil)
@@ -1485,7 +1662,8 @@ func TestStream_ServerError(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt: "Test",
 	})
@@ -1516,7 +1694,8 @@ func TestStream_EventsChannel(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt: "Test",
 	})
@@ -1553,7 +1732,8 @@ func TestStream_MultilineData(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt: "Test",
 	})
@@ -1580,7 +1760,8 @@ func TestStream_WithEventType(t *testing.T) {
 	defer server.Close()
 
 	// Act
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
 		Prompt: "Test",
 	})
@@ -1614,7 +1795,8 @@ func TestStream_ContextCancellation(t *testing.T) {
 
 	// Act
 	ctx, cancel := context.WithCancel(context.Background())
-	client := stromboli.NewClient(server.URL)
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
 	stream, err := client.Stream(ctx, &stromboli.StreamRequest{
 		Prompt: "Test",
 	})

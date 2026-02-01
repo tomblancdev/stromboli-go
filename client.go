@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"sync"
 	"time"
 
 	"github.com/go-openapi/runtime"
@@ -41,7 +42,10 @@ const (
 //
 // Create a new client using [NewClient]:
 //
-//	client := stromboli.NewClient("http://localhost:8585")
+//	client, err := stromboli.NewClient("http://localhost:8585")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
 // The client is safe for concurrent use by multiple goroutines.
 //
@@ -79,6 +83,9 @@ type Client struct {
 	// userAgent is the User-Agent header value.
 	userAgent string
 
+	// mu protects token for concurrent access.
+	mu sync.RWMutex
+
 	// token is the Bearer token for authenticated requests.
 	token string
 
@@ -93,16 +100,30 @@ type Client struct {
 //   - "http://localhost:8585"
 //   - "https://stromboli.example.com"
 //
+// Returns an error if the URL is invalid or malformed.
+//
 // Use functional options to customize the client:
 //
-//	client := stromboli.NewClient("http://localhost:8585",
+//	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
 //	    stromboli.WithRetries(3),
 //	    stromboli.WithHTTPClient(customHTTPClient),
 //	)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
 //
 // The returned client is safe for concurrent use.
-func NewClient(baseURL string, opts ...Option) *Client {
+func NewClient(baseURL string, opts ...Option) (*Client, error) {
+	// Validate URL upfront
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return nil, fmt.Errorf("stromboli: invalid base URL: %w", err)
+	}
+	if u.Host == "" {
+		return nil, fmt.Errorf("stromboli: base URL must include host")
+	}
+
 	c := &Client{
 		baseURL:    baseURL,
 		httpClient: http.DefaultClient,
@@ -119,20 +140,30 @@ func NewClient(baseURL string, opts ...Option) *Client {
 	// Initialize the generated client
 	c.api = c.newGeneratedClient()
 
-	return c
+	return c, nil
+}
+
+// userAgentTransport wraps http.RoundTripper to add User-Agent header.
+type userAgentTransport struct {
+	base      http.RoundTripper
+	userAgent string
+}
+
+// RoundTrip implements http.RoundTripper.
+func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	req = req.Clone(req.Context())
+	req.Header.Set("User-Agent", t.userAgent)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(req)
 }
 
 // newGeneratedClient creates the underlying go-swagger client.
 func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
-	// Parse the base URL
-	u, err := url.Parse(c.baseURL)
-	if err != nil {
-		// Use defaults if URL parsing fails
-		u = &url.URL{
-			Scheme: "http",
-			Host:   "localhost:8585",
-		}
-	}
+	// URL already validated in NewClient
+	u, _ := url.Parse(c.baseURL)
 
 	// Determine scheme
 	schemes := []string{u.Scheme}
@@ -140,9 +171,12 @@ func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
 		schemes = []string{"http"}
 	}
 
-	// Create transport
+	// Create transport with user agent
 	transport := httptransport.New(u.Host, u.Path, schemes)
-	transport.Transport = c.httpClient.Transport
+	transport.Transport = &userAgentTransport{
+		base:      c.httpClient.Transport,
+		userAgent: c.userAgent,
+	}
 
 	// Create client
 	return generatedclient.New(transport, strfmt.Default)
@@ -972,13 +1006,21 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error 
 
 // bearerAuth returns a runtime.ClientAuthInfoWriter for Bearer token auth.
 func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
-	return httptransport.BearerToken(c.token)
+	return httptransport.BearerToken(c.getToken())
+}
+
+// getToken returns the current token (thread-safe).
+func (c *Client) getToken() string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.token
 }
 
 // SetToken sets the Bearer token for authenticated requests.
 //
 // This token is used for endpoints that require authentication,
 // such as [Client.ValidateToken] and [Client.Logout].
+// SetToken is safe for concurrent use.
 //
 // Example:
 //
@@ -988,6 +1030,8 @@ func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
 //	// Now authenticated endpoints will work
 //	validation, _ := client.ValidateToken(ctx)
 func (c *Client) SetToken(token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.token = token
 }
 
@@ -1107,7 +1151,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenR
 //	    fmt.Printf("Expires at: %d\n", validation.ExpiresAt)
 //	}
 func (c *Client) ValidateToken(ctx context.Context) (*TokenValidation, error) {
-	if c.token == "" {
+	if c.getToken() == "" {
 		return nil, newError("UNAUTHORIZED", "no token set, use SetToken() first", 401, nil)
 	}
 
@@ -1154,7 +1198,7 @@ func (c *Client) ValidateToken(ctx context.Context) (*TokenValidation, error) {
 //	    client.SetToken("") // Clear the token
 //	}
 func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
-	if c.token == "" {
+	if c.getToken() == "" {
 		return nil, newError("UNAUTHORIZED", "no token set, use SetToken() first", 401, nil)
 	}
 
