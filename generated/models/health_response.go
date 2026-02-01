@@ -20,7 +20,7 @@ import (
 type HealthResponse struct {
 
 	// components
-	Components []*ComponentHealth `json:"components"`
+	Components []*ComponentHealth `json:"components,omitempty"`
 
 	// name
 	// Example: stromboli

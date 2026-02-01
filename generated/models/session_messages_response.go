@@ -26,7 +26,7 @@ type SessionMessagesResponse struct {
 	Limit int64 `json:"limit,omitempty"`
 
 	// messages
-	Messages []*StromboliInternalHistoryMessage `json:"messages"`
+	Messages []*StromboliInternalHistoryMessage `json:"messages,omitempty"`
 
 	// offset
 	Offset int64 `json:"offset,omitempty"`

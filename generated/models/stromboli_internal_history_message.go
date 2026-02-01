@@ -19,9 +19,7 @@ import (
 type StromboliInternalHistoryMessage struct {
 
 	// The actual message content
-	Content struct {
-		StromboliInternalHistoryMessageContent
-	} `json:"content,omitempty"`
+	Content StromboliInternalHistoryMessageContent `json:"content,omitempty"`
 
 	// Working directory at time of message
 	// Example: /workspace
@@ -48,15 +46,11 @@ type StromboliInternalHistoryMessage struct {
 	Timestamp string `json:"timestamp,omitempty"`
 
 	// Tool use result (for tool_result messages)
-	ToolResult struct {
-		StromboliInternalHistoryToolResult
-	} `json:"tool_result,omitempty"`
+	ToolResult StromboliInternalHistoryToolResult `json:"tool_result,omitempty"`
 
 	// Message type: user, assistant, queue-operation
 	// Example: assistant
-	Type struct {
-		StromboliInternalHistoryMessageType
-	} `json:"type,omitempty"`
+	Type StromboliInternalHistoryMessageType `json:"type,omitempty"`
 
 	// Unique identifier for this message
 	// Example: 40adde19-546a-43e8-ad25-31ef4faa4112

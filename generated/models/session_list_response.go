@@ -22,7 +22,7 @@ type SessionListResponse struct {
 
 	// sessions
 	// Example: ["sess-abc123","sess-def456"]
-	Sessions []string `json:"sessions"`
+	Sessions []string `json:"sessions,omitempty"`
 }
 
 // Validate validates this session list response

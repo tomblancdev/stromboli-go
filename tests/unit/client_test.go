@@ -526,19 +526,19 @@ func TestListJobs_Success(t *testing.T) {
 			"jobs": []map[string]interface{}{
 				{
 					"id":         "job-001",
-					"status":     map[string]string{"status": "completed"},
+					"status":     "completed",
 					"output":     "Task completed",
 					"session_id": "sess-001",
 					"created_at": "2024-01-15T10:30:00Z",
 				},
 				{
 					"id":         "job-002",
-					"status":     map[string]string{"status": "running"},
+					"status":     "running",
 					"created_at": "2024-01-15T10:35:00Z",
 				},
 				{
 					"id":         "job-003",
-					"status":     map[string]string{"status": "pending"},
+					"status":     "pending",
 					"created_at": "2024-01-15T10:40:00Z",
 				},
 			},
@@ -605,7 +605,7 @@ func TestGetJob_Success(t *testing.T) {
 		// Return mock response
 		resp := map[string]interface{}{
 			"id":         "job-abc123",
-			"status":     map[string]string{"status": "completed"},
+			"status":     "completed",
 			"output":     "Hello from Claude!",
 			"session_id": "sess-xyz789",
 			"created_at": "2024-01-15T10:30:00Z",
@@ -637,7 +637,7 @@ func TestGetJob_Failed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
 			"id":     "job-failed",
-			"status": map[string]string{"status": "failed"},
+			"status": "failed",
 			"error":  "Claude execution timed out",
 			"crash_info": map[string]interface{}{
 				"reason":         "Timeout exceeded",
@@ -876,13 +876,13 @@ func TestGetMessages_Success(t *testing.T) {
 			"messages": []map[string]interface{}{
 				{
 					"uuid":       "msg-001",
-					"type":       map[string]string{"stromboli_internal_history_message_type": "user"},
+					"type":       "user",
 					"session_id": "sess-abc123",
 					"timestamp":  "2024-01-15T10:30:00Z",
 				},
 				{
 					"uuid":       "msg-002",
-					"type":       map[string]string{"stromboli_internal_history_message_type": "assistant"},
+					"type":       "assistant",
 					"session_id": "sess-abc123",
 					"timestamp":  "2024-01-15T10:30:05Z",
 				},
@@ -979,7 +979,7 @@ func TestGetMessage_Success(t *testing.T) {
 		resp := map[string]interface{}{
 			"message": map[string]interface{}{
 				"uuid":            "msg-001",
-				"type":            map[string]string{"stromboli_internal_history_message_type": "assistant"},
+				"type":            "assistant",
 				"session_id":      "sess-abc123",
 				"cwd":             "/workspace",
 				"git_branch":      "main",

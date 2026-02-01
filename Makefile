@@ -76,7 +76,13 @@ test-coverage: build-image
 	@echo "Coverage report: coverage.html"
 
 test-e2e: build-image
-	$(call run_in_container,go test -tags=e2e ./tests/e2e/...)
+	@echo "Starting E2E tests with Prism mock server..."
+	$(CONTAINER_ENGINE) run --rm -v $(PWD):$(WORKDIR):Z -w $(WORKDIR) $(IMAGE_NAME) /bin/sh -c '\
+		prism mock generated/swagger.yaml --host 0.0.0.0 --port 4010 & \
+		sleep 2 && \
+		go test -tags=e2e ./tests/e2e/... || exit_code=$$? && \
+		kill %1 2>/dev/null || true && \
+		exit $${exit_code:-0}'
 
 # Mocking
 mocks: build-image

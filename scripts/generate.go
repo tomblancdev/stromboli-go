@@ -142,5 +142,75 @@ func generateClient(swaggerPath string) error {
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		return err
+	}
+
+	// Post-process generated models to fix enum struct wrapping
+	fmt.Println("Post-processing generated models...")
+	if err := fixGeneratedModels(); err != nil {
+		return fmt.Errorf("fixing models: %w", err)
+	}
+
+	return nil
+}
+
+// fixGeneratedModels fixes go-swagger issues:
+// 1. Anonymous struct wrapping of enum types
+// 2. Missing omitempty on array/slice fields
+func fixGeneratedModels() error {
+	modelsDir := filepath.Join(outputDir, "models")
+
+	// Pattern 1: Fix enum struct wrapping
+	// Matches: TypeName struct {\n\t\tTypeName\n\t} `json:"field_name..."`
+	structWrapPattern := regexp.MustCompile(
+		`(\w+) struct \{\s+(\w+)\s+\} (\x60json:"[^"]+(?:,omitempty)?"\x60)`,
+	)
+
+	// Pattern 2: Add omitempty to array/slice fields that don't have it
+	// Matches: FieldName []Type `json:"field_name"`
+	// Captures: (FieldName []Type `json:"field_name)("`))
+	arrayOmitemptyPattern := regexp.MustCompile(
+		`(\w+ \[\][^\x60]+\x60json:"[^"]+)("\x60)`,
+	)
+
+	return filepath.Walk(modelsDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		if info.IsDir() || !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+
+		content := string(data)
+		original := content
+
+		// Fix 1: Replace struct wrapping with direct type usage
+		content = structWrapPattern.ReplaceAllString(content, "$1 $2 $3")
+
+		// Fix 2: Add omitempty to array fields (only if not already present)
+		content = arrayOmitemptyPattern.ReplaceAllStringFunc(content, func(match string) string {
+			if strings.Contains(match, ",omitempty") {
+				return match // Already has omitempty
+			}
+			// Insert ,omitempty before the closing quote
+			return arrayOmitemptyPattern.ReplaceAllString(match, "$1,omitempty$2")
+		})
+
+		// Only write if changed
+		if content != original {
+			fmt.Printf("  Fixed: %s\n", filepath.Base(path))
+			if err := os.WriteFile(path, []byte(content), info.Mode()); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
 }

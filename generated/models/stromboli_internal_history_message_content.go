@@ -20,7 +20,7 @@ import (
 type StromboliInternalHistoryMessageContent struct {
 
 	// Content blocks (text, tool_use, tool_result)
-	Content []*StromboliInternalHistoryContentBlock `json:"content"`
+	Content []*StromboliInternalHistoryContentBlock `json:"content,omitempty"`
 
 	// Message ID from API
 	// Example: msg_017ETE4Wk32ZXAQJp3GXP1Bo
@@ -39,9 +39,7 @@ type StromboliInternalHistoryMessageContent struct {
 	StopReason string `json:"stop_reason,omitempty"`
 
 	// Token usage
-	Usage struct {
-		StromboliInternalHistoryUsage
-	} `json:"usage,omitempty"`
+	Usage StromboliInternalHistoryUsage `json:"usage,omitempty"`
 }
 
 // Validate validates this stromboli internal history message content

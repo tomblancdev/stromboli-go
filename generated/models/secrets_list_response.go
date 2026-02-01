@@ -22,7 +22,7 @@ type SecretsListResponse struct {
 
 	// secrets
 	// Example: ["github-token","gitlab-token"]
-	Secrets []string `json:"secrets"`
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 // Validate validates this secrets list response

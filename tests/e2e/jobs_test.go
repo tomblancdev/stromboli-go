@@ -12,8 +12,6 @@ import (
 
 // TestListJobs_E2E tests listing jobs against a real/mock server.
 func TestListJobs_E2E(t *testing.T) {
-	skipIfMock(t, "Jobs endpoint returns mismatched mock data (status as string)")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 
@@ -32,8 +30,6 @@ func TestListJobs_E2E(t *testing.T) {
 // Note: This test may fail with 404 if no jobs exist.
 // In a real test environment, you would first create a job with RunAsync.
 func TestGetJob_E2E(t *testing.T) {
-	skipIfMock(t, "Jobs endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 

@@ -42,9 +42,7 @@ type JobResponse struct {
 
 	// status
 	// Example: running
-	Status struct {
-		Status
-	} `json:"status,omitempty"`
+	Status Status `json:"status,omitempty"`
 
 	// updated at
 	// Example: 2024-01-15T10:31:00Z

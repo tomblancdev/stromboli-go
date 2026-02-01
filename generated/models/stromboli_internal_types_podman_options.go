@@ -44,7 +44,7 @@ type StromboliInternalTypesPodmanOptions struct {
 
 	// Volume mounts (host:container or host:container:options format)
 	// Example: ["/data:/data:ro"]
-	Volumes []string `json:"volumes"`
+	Volumes []string `json:"volumes,omitempty"`
 }
 
 // Validate validates this stromboli internal types podman options

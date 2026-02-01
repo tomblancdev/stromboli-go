@@ -20,7 +20,7 @@ import (
 type JobListResponse struct {
 
 	// jobs
-	Jobs []*JobResponse `json:"jobs"`
+	Jobs []*JobResponse `json:"jobs,omitempty"`
 }
 
 // Validate validates this job list response

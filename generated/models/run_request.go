@@ -20,14 +20,10 @@ import (
 type RunRequest struct {
 
 	// Claude configuration - all CLI options exposed
-	Claude struct {
-		StromboliInternalTypesClaudeOptions
-	} `json:"claude,omitempty"`
+	Claude StromboliInternalTypesClaudeOptions `json:"claude,omitempty"`
 
 	// Podman configuration
-	Podman struct {
-		StromboliInternalTypesPodmanOptions
-	} `json:"podman,omitempty"`
+	Podman StromboliInternalTypesPodmanOptions `json:"podman,omitempty"`
 
 	// Required: the prompt to send to Claude
 	// Example: Analyze this code and suggest improvements

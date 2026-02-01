@@ -34,8 +34,6 @@ func TestListSessions_E2E(t *testing.T) {
 //
 // Note: This test may fail with 404 if no sessions exist.
 func TestGetMessages_E2E(t *testing.T) {
-	skipIfMock(t, "Messages endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 
@@ -64,8 +62,6 @@ func TestGetMessages_E2E(t *testing.T) {
 
 // TestGetMessages_WithPagination_E2E tests paginated message retrieval.
 func TestGetMessages_WithPagination_E2E(t *testing.T) {
-	skipIfMock(t, "Messages endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 

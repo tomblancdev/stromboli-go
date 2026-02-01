@@ -635,7 +635,7 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
 	job := &Job{
 		ID:        j.ID,
-		Status:    string(j.Status.Status),
+		Status:    string(j.Status),
 		Output:    j.Output,
 		Error:     j.Error,
 		SessionID: j.SessionID,
@@ -879,7 +879,7 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 func (c *Client) fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
 	return &Message{
 		UUID:           m.UUID,
-		Type:           string(m.Type.StromboliInternalHistoryMessageType),
+		Type:           string(m.Type),
 		ParentUUID:     m.ParentUUID,
 		SessionID:      m.SessionID,
 		Cwd:            m.Cwd,

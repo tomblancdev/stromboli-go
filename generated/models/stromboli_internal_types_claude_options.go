@@ -18,7 +18,7 @@ import (
 type StromboliInternalTypesClaudeOptions struct {
 
 	// Additional directories for tool access
-	AddDirs []string `json:"add_dirs"`
+	AddDirs []string `json:"add_dirs,omitempty"`
 
 	// Agent for current session
 	// Example: reviewer
@@ -33,14 +33,14 @@ type StromboliInternalTypesClaudeOptions struct {
 
 	// Allowed tools with patterns (e.g., "Bash(git:*)")
 	// Example: ["Bash(git:*)","Read"]
-	AllowedTools []string `json:"allowed_tools"`
+	AllowedTools []string `json:"allowed_tools,omitempty"`
 
 	// Append to default system prompt
 	// Example: Focus on security best practices
 	AppendSystemPrompt string `json:"append_system_prompt,omitempty"`
 
 	// Beta headers for API requests
-	Betas []string `json:"betas"`
+	Betas []string `json:"betas,omitempty"`
 
 	// Continue most recent conversation in workspace (ignores session_id)
 	// Example: false
@@ -60,14 +60,14 @@ type StromboliInternalTypesClaudeOptions struct {
 
 	// Denied tools
 	// Example: ["Write"]
-	DisallowedTools []string `json:"disallowed_tools"`
+	DisallowedTools []string `json:"disallowed_tools,omitempty"`
 
 	// Fallback model when default is overloaded
 	// Example: haiku
 	FallbackModel string `json:"fallback_model,omitempty"`
 
 	// File resources (format: file_id:path)
-	Files []string `json:"files"`
+	Files []string `json:"files,omitempty"`
 
 	// Create new session ID when resuming
 	// Example: false
@@ -90,7 +90,7 @@ type StromboliInternalTypesClaudeOptions struct {
 	MaxBudgetUsd float64 `json:"max_budget_usd,omitempty"`
 
 	// MCP server config files or JSON strings
-	McpConfigs []string `json:"mcp_configs"`
+	McpConfigs []string `json:"mcp_configs,omitempty"`
 
 	// Model alias (sonnet, opus, haiku) or full name
 	// Example: sonnet
@@ -109,7 +109,7 @@ type StromboliInternalTypesClaudeOptions struct {
 	PermissionMode string `json:"permission_mode,omitempty"`
 
 	// Plugin directories
-	PluginDirs []string `json:"plugin_dirs"`
+	PluginDirs []string `json:"plugin_dirs,omitempty"`
 
 	// Re-emit user messages on stdout
 	// Example: false
@@ -125,7 +125,7 @@ type StromboliInternalTypesClaudeOptions struct {
 
 	// Setting sources to load: user, project, local
 	// Example: ["user","project"]
-	SettingSources []string `json:"setting_sources"`
+	SettingSources []string `json:"setting_sources,omitempty"`
 
 	// Path to settings JSON file or JSON string
 	Settings string `json:"settings,omitempty"`
@@ -140,7 +140,7 @@ type StromboliInternalTypesClaudeOptions struct {
 
 	// Built-in tools ("", "default", or specific names)
 	// Example: ["Bash","Read","Edit"]
-	Tools []string `json:"tools"`
+	Tools []string `json:"tools,omitempty"`
 
 	// Enable verbose mode
 	// Example: false

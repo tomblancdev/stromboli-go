@@ -12,12 +12,7 @@ import (
 )
 
 // TestRun_E2E tests synchronous execution against a real/mock server.
-//
-// Note: This test requires a real Stromboli server because Prism returns
-// mock data that doesn't match the expected response format.
 func TestRun_E2E(t *testing.T) {
-	skipIfMock(t, "Run endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 
@@ -45,8 +40,6 @@ func TestRun_E2E(t *testing.T) {
 
 // TestRun_WithOptions_E2E tests execution with various options.
 func TestRun_WithOptions_E2E(t *testing.T) {
-	skipIfMock(t, "Run endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 
@@ -73,8 +66,6 @@ func TestRun_WithOptions_E2E(t *testing.T) {
 
 // TestRunAsync_E2E tests asynchronous execution.
 func TestRunAsync_E2E(t *testing.T) {
-	skipIfMock(t, "RunAsync endpoint returns mismatched mock data")
-
 	client := newTestClient()
 	ctx := newTestContext(t)
 
