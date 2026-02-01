@@ -12,7 +12,8 @@ formatters:
     gofmt:
       simplify: true
     goimports:
-      local-prefixes: github.com/tomblancdev/stromboli-go
+      local-prefixes:
+        - github.com/tomblancdev/stromboli-go
 
 linters:
   enable:
