@@ -334,6 +334,97 @@ type AsyncRunResponse struct {
 }
 
 // ----------------------------------------------------------------------------
+// Job Types
+// ----------------------------------------------------------------------------
+
+// Job represents the status and result of an async job.
+//
+// Use [Client.GetJob] to retrieve job status, or [Client.ListJobs] to
+// list all jobs:
+//
+//	job, err := client.GetJob(ctx, "job-abc123")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	switch job.Status {
+//	case stromboli.JobStatusCompleted:
+//	    fmt.Println(job.Output)
+//	case stromboli.JobStatusRunning:
+//	    fmt.Println("Still running...")
+//	case stromboli.JobStatusFailed:
+//	    fmt.Printf("Failed: %s\n", job.Error)
+//	}
+type Job struct {
+	// ID is the unique job identifier.
+	// Example: "job-abc123def456"
+	ID string `json:"id"`
+
+	// Status indicates the current job state.
+	// Values: "pending", "running", "completed", "failed", "cancelled"
+	Status string `json:"status"`
+
+	// Output contains Claude's response when Status is "completed".
+	Output string `json:"output,omitempty"`
+
+	// Error contains the error message when Status is "failed".
+	Error string `json:"error,omitempty"`
+
+	// SessionID can be used to continue this conversation.
+	// Pass this to RunRequest.Claude.SessionID for follow-up requests.
+	SessionID string `json:"session_id,omitempty"`
+
+	// CreatedAt is when the job was created (RFC3339 format).
+	// Example: "2024-01-15T10:30:00Z"
+	CreatedAt string `json:"created_at,omitempty"`
+
+	// UpdatedAt is when the job was last updated (RFC3339 format).
+	// Example: "2024-01-15T10:31:00Z"
+	UpdatedAt string `json:"updated_at,omitempty"`
+
+	// CrashInfo contains crash details if the job crashed.
+	CrashInfo *CrashInfo `json:"crash_info,omitempty"`
+}
+
+// IsCompleted returns true if the job completed successfully.
+func (j *Job) IsCompleted() bool {
+	return j.Status == JobStatusCompleted
+}
+
+// IsRunning returns true if the job is still running.
+func (j *Job) IsRunning() bool {
+	return j.Status == JobStatusRunning || j.Status == JobStatusPending
+}
+
+// IsFailed returns true if the job failed.
+func (j *Job) IsFailed() bool {
+	return j.Status == JobStatusFailed
+}
+
+// IsCancelled returns true if the job was cancelled.
+func (j *Job) IsCancelled() bool {
+	return j.Status == JobStatusCancelled
+}
+
+// CrashInfo contains details about a job crash.
+//
+// This is populated when a job terminates unexpectedly due to
+// container issues, OOM errors, or other infrastructure problems.
+type CrashInfo struct {
+	// Reason is a human-readable description of why the job crashed.
+	// Example: "Container OOM killed", "Timeout exceeded"
+	Reason string `json:"reason,omitempty"`
+
+	// ExitCode is the container exit code (if available).
+	// Common values: 137 (OOM), 143 (SIGTERM), 1 (general error)
+	ExitCode int64 `json:"exit_code,omitempty"`
+
+	// PartialOutput contains any output captured before the crash.
+	// This can help debug what the job was doing when it crashed.
+	PartialOutput string `json:"partial_output,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
 
@@ -374,4 +465,28 @@ const (
 
 	// StatusError indicates the service or component has an error.
 	StatusError = "error"
+)
+
+// JobStatus constants for async job states.
+//
+// Use these with [Job.Status]:
+//
+//	if job.Status == stromboli.JobStatusCompleted {
+//	    fmt.Println(job.Output)
+//	}
+const (
+	// JobStatusPending indicates the job is queued but not yet started.
+	JobStatusPending = "pending"
+
+	// JobStatusRunning indicates the job is currently executing.
+	JobStatusRunning = "running"
+
+	// JobStatusCompleted indicates the job completed successfully.
+	JobStatusCompleted = "completed"
+
+	// JobStatusFailed indicates the job failed with an error.
+	JobStatusFailed = "failed"
+
+	// JobStatusCancelled indicates the job was cancelled.
+	JobStatusCancelled = "cancelled"
 )

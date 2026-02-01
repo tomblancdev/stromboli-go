@@ -508,3 +508,261 @@ func TestRunAsync_NilRequest(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
 }
+
+// ----------------------------------------------------------------------------
+// Job Method Tests
+// ----------------------------------------------------------------------------
+
+// TestListJobs_Success tests the ListJobs method with multiple jobs.
+func TestListJobs_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/jobs", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"jobs": []map[string]interface{}{
+				{
+					"id":         "job-001",
+					"status":     map[string]string{"status": "completed"},
+					"output":     "Task completed",
+					"session_id": "sess-001",
+					"created_at": "2024-01-15T10:30:00Z",
+				},
+				{
+					"id":         "job-002",
+					"status":     map[string]string{"status": "running"},
+					"created_at": "2024-01-15T10:35:00Z",
+				},
+				{
+					"id":         "job-003",
+					"status":     map[string]string{"status": "pending"},
+					"created_at": "2024-01-15T10:40:00Z",
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	jobs, err := client.ListJobs(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, jobs, 3)
+
+	// Check first job (completed)
+	assert.Equal(t, "job-001", jobs[0].ID)
+	assert.Equal(t, "completed", jobs[0].Status)
+	assert.Equal(t, "Task completed", jobs[0].Output)
+	assert.True(t, jobs[0].IsCompleted())
+
+	// Check second job (running)
+	assert.Equal(t, "job-002", jobs[1].ID)
+	assert.Equal(t, "running", jobs[1].Status)
+	assert.True(t, jobs[1].IsRunning())
+
+	// Check third job (pending)
+	assert.Equal(t, "job-003", jobs[2].ID)
+	assert.Equal(t, "pending", jobs[2].Status)
+	assert.True(t, jobs[2].IsRunning()) // Pending is considered running
+}
+
+// TestListJobs_Empty tests ListJobs when no jobs exist.
+func TestListJobs_Empty(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"jobs": []map[string]interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	jobs, err := client.ListJobs(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Empty(t, jobs)
+}
+
+// TestGetJob_Success tests the GetJob method with a completed job.
+func TestGetJob_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/jobs/job-abc123", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":         "job-abc123",
+			"status":     map[string]string{"status": "completed"},
+			"output":     "Hello from Claude!",
+			"session_id": "sess-xyz789",
+			"created_at": "2024-01-15T10:30:00Z",
+			"updated_at": "2024-01-15T10:31:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	job, err := client.GetJob(context.Background(), "job-abc123")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "job-abc123", job.ID)
+	assert.Equal(t, "completed", job.Status)
+	assert.Equal(t, "Hello from Claude!", job.Output)
+	assert.Equal(t, "sess-xyz789", job.SessionID)
+	assert.True(t, job.IsCompleted())
+	assert.False(t, job.IsRunning())
+	assert.False(t, job.IsFailed())
+}
+
+// TestGetJob_Failed tests GetJob with a failed job.
+func TestGetJob_Failed(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"id":     "job-failed",
+			"status": map[string]string{"status": "failed"},
+			"error":  "Claude execution timed out",
+			"crash_info": map[string]interface{}{
+				"reason":         "Timeout exceeded",
+				"exit_code":      137,
+				"partial_output": "Processing file 1 of 100...",
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	job, err := client.GetJob(context.Background(), "job-failed")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "failed", job.Status)
+	assert.True(t, job.IsFailed())
+	assert.Contains(t, job.Error, "timed out")
+
+	// Check crash info
+	require.NotNil(t, job.CrashInfo)
+	assert.Equal(t, "Timeout exceeded", job.CrashInfo.Reason)
+	assert.Equal(t, int64(137), job.CrashInfo.ExitCode)
+	assert.Contains(t, job.CrashInfo.PartialOutput, "Processing")
+}
+
+// TestGetJob_NotFound tests GetJob with an invalid job ID.
+func TestGetJob_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "job not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	job, err := client.GetJob(context.Background(), "invalid-id")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, job)
+
+	// Verify it's an API error (error code varies by go-swagger error handling)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.NotEmpty(t, apiErr.Code)
+}
+
+// TestGetJob_EmptyID tests GetJob with an empty job ID.
+func TestGetJob_EmptyID(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	job, err := client.GetJob(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, job)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestCancelJob_Success tests the CancelJob method.
+func TestCancelJob_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/jobs/job-cancel123", r.URL.Path)
+		assert.Equal(t, http.MethodDelete, r.Method)
+
+		// Return success (200 OK)
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, map[string]string{"status": "cancelled"})
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	err := client.CancelJob(context.Background(), "job-cancel123")
+
+	// Assert
+	require.NoError(t, err)
+}
+
+// TestCancelJob_NotFound tests CancelJob with an invalid job ID.
+func TestCancelJob_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "job not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	err := client.CancelJob(context.Background(), "invalid-id")
+
+	// Assert
+	require.Error(t, err)
+
+	// Verify it's an API error (error code varies by go-swagger error handling)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.NotEmpty(t, apiErr.Code)
+}
+
+// TestCancelJob_EmptyID tests CancelJob with an empty job ID.
+func TestCancelJob_EmptyID(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	err := client.CancelJob(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}

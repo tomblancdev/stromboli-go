@@ -13,6 +13,7 @@ import (
 
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
+	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
 	"github.com/tomblancdev/stromboli-go/generated/client/system"
 	"github.com/tomblancdev/stromboli-go/generated/models"
 )
@@ -463,6 +464,194 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 	}
 
 	return genReq
+}
+
+// ----------------------------------------------------------------------------
+// Job Methods
+// ----------------------------------------------------------------------------
+
+// ListJobs returns all async jobs.
+//
+// Use this method to get an overview of all jobs, their status, and
+// when they were created. The list includes pending, running, completed,
+// failed, and cancelled jobs.
+//
+// Example:
+//
+//	jobs, err := client.ListJobs(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, job := range jobs {
+//	    fmt.Printf("%s: %s (created: %s)\n", job.ID, job.Status, job.CreatedAt)
+//	}
+//
+// Filter by status:
+//
+//	jobs, _ := client.ListJobs(ctx)
+//	for _, job := range jobs {
+//	    if job.IsRunning() {
+//	        fmt.Printf("Job %s is still running\n", job.ID)
+//	    }
+//	}
+func (c *Client) ListJobs(ctx context.Context) ([]*Job, error) {
+	// Create request parameters with context
+	params := jobs.NewGetJobsParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request
+	resp, err := c.api.Jobs.GetJobs(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to list jobs")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty jobs list response", 0, nil)
+	}
+
+	// Map jobs
+	result := make([]*Job, 0, len(payload.Jobs))
+	for _, j := range payload.Jobs {
+		if j != nil {
+			result = append(result, c.fromGeneratedJobResponse(j))
+		}
+	}
+
+	return result, nil
+}
+
+// GetJob returns the status and result of an async job.
+//
+// Use this method to poll for job completion or check the status of
+// a previously started async execution.
+//
+// Basic polling example:
+//
+//	job, _ := client.RunAsync(ctx, req)
+//
+//	for {
+//	    status, err := client.GetJob(ctx, job.JobID)
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
+//
+//	    switch {
+//	    case status.IsCompleted():
+//	        fmt.Println(status.Output)
+//	        return
+//	    case status.IsFailed():
+//	        log.Fatalf("Job failed: %s", status.Error)
+//	    case status.IsRunning():
+//	        fmt.Println("Still running...")
+//	        time.Sleep(2 * time.Second)
+//	    }
+//	}
+//
+// Returns [ErrNotFound] if the job doesn't exist:
+//
+//	status, err := client.GetJob(ctx, "invalid-id")
+//	if errors.Is(err, stromboli.ErrNotFound) {
+//	    fmt.Println("Job not found")
+//	}
+func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
+	if jobID == "" {
+		return nil, newError("BAD_REQUEST", "job ID is required", 400, nil)
+	}
+
+	// Create request parameters with context
+	params := jobs.NewGetJobsIDParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetID(jobID)
+
+	// Execute request
+	resp, err := c.api.Jobs.GetJobsID(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to get job")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty job response", 0, nil)
+	}
+
+	return c.fromGeneratedJobResponse(payload), nil
+}
+
+// CancelJob cancels a pending or running job.
+//
+// Use this method to stop a job that is no longer needed. Only pending
+// and running jobs can be cancelled. Completed, failed, or already
+// cancelled jobs cannot be cancelled (returns 409 Conflict error).
+//
+// Example:
+//
+//	err := client.CancelJob(ctx, "job-abc123")
+//	if err != nil {
+//	    if errors.Is(err, stromboli.ErrNotFound) {
+//	        fmt.Println("Job not found")
+//	    } else {
+//	        log.Fatal(err)
+//	    }
+//	}
+//	fmt.Println("Job cancelled successfully")
+//
+// Cancel a job immediately after starting:
+//
+//	job, _ := client.RunAsync(ctx, req)
+//
+//	// Changed our mind, cancel it
+//	err := client.CancelJob(ctx, job.JobID)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+func (c *Client) CancelJob(ctx context.Context, jobID string) error {
+	if jobID == "" {
+		return newError("BAD_REQUEST", "job ID is required", 400, nil)
+	}
+
+	// Create request parameters with context
+	params := jobs.NewDeleteJobsIDParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetID(jobID)
+
+	// Execute request
+	_, err := c.api.Jobs.DeleteJobsID(params)
+	if err != nil {
+		return c.handleError(err, "failed to cancel job")
+	}
+
+	return nil
+}
+
+// fromGeneratedJobResponse converts a generated JobResponse to our Job type.
+func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
+	job := &Job{
+		ID:        j.ID,
+		Status:    string(j.Status.Status),
+		Output:    j.Output,
+		Error:     j.Error,
+		SessionID: j.SessionID,
+		CreatedAt: j.CreatedAt,
+		UpdatedAt: j.UpdatedAt,
+	}
+
+	// Convert crash info if present
+	if j.CrashInfo != nil {
+		job.CrashInfo = &CrashInfo{
+			Reason:        j.CrashInfo.Reason,
+			ExitCode:      j.CrashInfo.ExitCode,
+			PartialOutput: j.CrashInfo.PartialOutput,
+		}
+	}
+
+	return job
 }
 
 // ----------------------------------------------------------------------------
