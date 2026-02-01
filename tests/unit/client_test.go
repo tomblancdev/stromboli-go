@@ -3,6 +3,7 @@ package unit
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -1349,4 +1350,284 @@ func TestListSecrets_Error(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "SECRETS_ERROR", apiErr.Code)
 	assert.Contains(t, apiErr.Message, "podman not available")
+}
+
+// ============================================================================
+// Streaming Tests
+// ============================================================================
+
+// TestStream_Success tests the Stream method with SSE events.
+func TestStream_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/run/stream", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "Hello", r.URL.Query().Get("prompt"))
+		assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+
+		// Send SSE response
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		flusher, ok := w.(http.Flusher)
+		require.True(t, ok, "ResponseWriter should be a Flusher")
+
+		// Send events
+		fmt.Fprintf(w, "data: Hello\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "data: World\n\n")
+		flusher.Flush()
+		fmt.Fprintf(w, "event: done\ndata: \n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "Hello",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+	defer stream.Close()
+
+	// Collect events
+	var events []*stromboli.StreamEvent
+	for stream.Next() {
+		events = append(events, stream.Event())
+	}
+	require.NoError(t, stream.Err())
+
+	assert.Len(t, events, 3)
+	assert.Equal(t, "Hello", events[0].Data)
+	assert.Equal(t, "World", events[1].Data)
+	assert.Equal(t, "done", events[2].Type)
+}
+
+// TestStream_WithOptions tests streaming with workdir and session_id.
+func TestStream_WithOptions(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify query parameters
+		assert.Equal(t, "Test prompt", r.URL.Query().Get("prompt"))
+		assert.Equal(t, "/workspace", r.URL.Query().Get("workdir"))
+		assert.Equal(t, "sess-123", r.URL.Query().Get("session_id"))
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, "data: OK\n\n")
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt:    "Test prompt",
+		Workdir:   "/workspace",
+		SessionID: "sess-123",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	defer stream.Close()
+
+	require.True(t, stream.Next())
+	assert.Equal(t, "OK", stream.Event().Data)
+}
+
+// TestStream_EmptyPrompt tests Stream with an empty prompt.
+func TestStream_EmptyPrompt(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, stream)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestStream_NilRequest tests Stream with a nil request.
+func TestStream_NilRequest(t *testing.T) {
+	// Arrange
+	client := stromboli.NewClient("http://localhost:8585")
+
+	// Act
+	stream, err := client.Stream(context.Background(), nil)
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, stream)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestStream_ServerError tests Stream when the server returns an error.
+func TestStream_ServerError(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("Invalid prompt"))
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "Test",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, stream)
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "STREAM_ERROR", apiErr.Code)
+	assert.Equal(t, 400, apiErr.Status)
+}
+
+// TestStream_EventsChannel tests the Events() channel method.
+func TestStream_EventsChannel(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		flusher := w.(http.Flusher)
+		for i := 1; i <= 3; i++ {
+			fmt.Fprintf(w, "data: Line %d\n\n", i)
+			flusher.Flush()
+		}
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "Test",
+	})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	// Collect events via channel
+	events := make([]*stromboli.StreamEvent, 0, 3)
+	for event := range stream.Events() {
+		events = append(events, event)
+	}
+
+	// Assert
+	require.NoError(t, stream.Err())
+	assert.Len(t, events, 3)
+	assert.Equal(t, "Line 1", events[0].Data)
+	assert.Equal(t, "Line 2", events[1].Data)
+	assert.Equal(t, "Line 3", events[2].Data)
+}
+
+// TestStream_MultilineData tests SSE events with multiline data.
+func TestStream_MultilineData(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// Send multiline data (each line prefixed with "data:")
+		fmt.Fprintf(w, "data: Line 1\n")
+		fmt.Fprintf(w, "data: Line 2\n")
+		fmt.Fprintf(w, "data: Line 3\n")
+		fmt.Fprintf(w, "\n") // End of event
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "Test",
+	})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	// Assert
+	require.True(t, stream.Next())
+	assert.Equal(t, "Line 1\nLine 2\nLine 3", stream.Event().Data)
+}
+
+// TestStream_WithEventType tests SSE events with event type.
+func TestStream_WithEventType(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		fmt.Fprintf(w, "event: message\n")
+		fmt.Fprintf(w, "id: 123\n")
+		fmt.Fprintf(w, "data: Hello\n")
+		fmt.Fprintf(w, "\n")
+	}))
+	defer server.Close()
+
+	// Act
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "Test",
+	})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	// Assert
+	require.True(t, stream.Next())
+	event := stream.Event()
+	assert.Equal(t, "message", event.Type)
+	assert.Equal(t, "123", event.ID)
+	assert.Equal(t, "Hello", event.Data)
+}
+
+// TestStream_ContextCancellation tests that streams respect context cancellation.
+func TestStream_ContextCancellation(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		flusher := w.(http.Flusher)
+		// Send one event then wait
+		fmt.Fprintf(w, "data: First\n\n")
+		flusher.Flush()
+
+		// Wait for context cancellation (this would block forever otherwise)
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	// Act
+	ctx, cancel := context.WithCancel(context.Background())
+	client := stromboli.NewClient(server.URL)
+	stream, err := client.Stream(ctx, &stromboli.StreamRequest{
+		Prompt: "Test",
+	})
+	require.NoError(t, err)
+	defer stream.Close()
+
+	// Get first event
+	require.True(t, stream.Next())
+	assert.Equal(t, "First", stream.Event().Data)
+
+	// Cancel context
+	cancel()
+
+	// Next should return false (stream closed due to cancellation)
+	assert.False(t, stream.Next())
 }
