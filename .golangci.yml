@@ -1,17 +1,26 @@
+version: "2"
+
 run:
   timeout: 5m
-  go: "1.23"
+  go: "1.24"
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes: github.com/tomblancdev/stromboli-go
 
 linters:
   enable:
     - errcheck
-    - gosimple
     - govet
     - ineffassign
-    - staticcheck
+    - staticcheck  # includes gosimple
     - unused
-    - gofmt
-    - goimports
     - misspell
     - unconvert
     - unparam
@@ -20,42 +29,36 @@ linters:
     - copyloopvar
     - gocritic
     - revive
-
-linters-settings:
-  gofmt:
-    simplify: true
-  goimports:
-    local-prefixes: github.com/tomblancdev/stromboli-go
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-  revive:
+  settings:
+    gocritic:
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+    revive:
+      rules:
+        - name: blank-imports
+        - name: context-as-argument
+        - name: context-keys-type
+        - name: dot-imports
+        - name: error-return
+        - name: error-strings
+        - name: error-naming
+        - name: exported
+        - name: increment-decrement
+        - name: var-naming
+        - name: package-comments
+        - name: range
+        - name: receiver-naming
+        - name: time-naming
+        - name: unexported-return
+        - name: indent-error-flow
+        - name: errorf
+  exclusions:
+    paths:
+      - generated
     rules:
-      - name: blank-imports
-      - name: context-as-argument
-      - name: context-keys-type
-      - name: dot-imports
-      - name: error-return
-      - name: error-strings
-      - name: error-naming
-      - name: exported
-      - name: increment-decrement
-      - name: var-naming
-      - name: package-comments
-      - name: range
-      - name: receiver-naming
-      - name: time-naming
-      - name: unexported-return
-      - name: indent-error-flow
-      - name: errorf
-
-issues:
-  exclude-dirs:
-    - generated
-  exclude-rules:
-    # Ignore missing comments in test files
-    - path: _test\.go
-      linters:
-        - revive
+      # Ignore missing comments in test files
+      - path: _test\.go
+        linters:
+          - revive
