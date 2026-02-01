@@ -499,6 +499,7 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 		genReq.Claude.DangerouslySkipPermissions = req.Claude.DangerouslySkipPermissions
 		genReq.Claude.PermissionMode = req.Claude.PermissionMode
 		genReq.Claude.OutputFormat = req.Claude.OutputFormat
+		genReq.Claude.JSONSchema = req.Claude.JSONSchema
 		genReq.Claude.Verbose = req.Claude.Verbose
 		genReq.Claude.Debug = req.Claude.Debug
 		genReq.Claude.Continue = req.Claude.Continue
