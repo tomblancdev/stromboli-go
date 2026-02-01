@@ -12,7 +12,9 @@ import (
 	"github.com/go-openapi/strfmt"
 
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
+	"github.com/tomblancdev/stromboli-go/generated/client/execution"
 	"github.com/tomblancdev/stromboli-go/generated/client/system"
+	"github.com/tomblancdev/stromboli-go/generated/models"
 )
 
 // Default configuration values.
@@ -45,7 +47,9 @@ const (
 //   - [Client.Health]: Check API health status
 //   - [Client.ClaudeStatus]: Check Claude configuration status
 //
-// More methods will be added for execution, jobs, and sessions.
+// Execution:
+//   - [Client.Run]: Execute Claude synchronously
+//   - [Client.RunAsync]: Execute Claude asynchronously (returns job ID)
 type Client struct {
 	// baseURL is the Stromboli API base URL.
 	baseURL string
@@ -244,6 +248,221 @@ func (c *Client) ClaudeStatus(ctx context.Context) (*ClaudeStatus, error) {
 		Configured: payload.Configured,
 		Message:    payload.Message,
 	}, nil
+}
+
+// ----------------------------------------------------------------------------
+// Execution Methods
+// ----------------------------------------------------------------------------
+
+// Run executes Claude synchronously and waits for the result.
+//
+// This method blocks until Claude completes execution or an error occurs.
+// For long-running tasks, consider using [Client.RunAsync] instead.
+//
+// Basic usage:
+//
+//	result, err := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt: "Hello, Claude!",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Println(result.Output)
+//
+// With configuration:
+//
+//	result, err := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt:  "Review this code for security issues",
+//	    Workdir: "/workspace",
+//	    Claude: &stromboli.ClaudeOptions{
+//	        Model:        stromboli.ModelSonnet,
+//	        MaxBudgetUSD: 5.0,
+//	        AllowedTools: []string{"Read", "Glob", "Grep"},
+//	    },
+//	    Podman: &stromboli.PodmanOptions{
+//	        Memory:  "2g",
+//	        Timeout: "10m",
+//	        Volumes: []string{"/home/user/project:/workspace:ro"},
+//	    },
+//	})
+//
+// Continuing a conversation:
+//
+//	// First request
+//	result1, _ := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt: "Remember: my favorite color is blue",
+//	})
+//
+//	// Continue the conversation
+//	result2, _ := client.Run(ctx, &stromboli.RunRequest{
+//	    Prompt: "What's my favorite color?",
+//	    Claude: &stromboli.ClaudeOptions{
+//	        SessionID: result1.SessionID,
+//	        Resume:    true,
+//	    },
+//	})
+//
+// The context can be used for cancellation:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+//	defer cancel()
+//	result, err := client.Run(ctx, req)
+func (c *Client) Run(ctx context.Context, req *RunRequest) (*RunResponse, error) {
+	if req == nil {
+		return nil, newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Prompt == "" {
+		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
+	}
+
+	// Convert to generated model
+	genReq := c.toGeneratedRunRequest(req)
+
+	// Create request parameters
+	params := execution.NewPostRunParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetRequest(genReq)
+
+	// Execute request
+	resp, err := c.api.Execution.PostRun(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to execute Claude")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty run response", 0, nil)
+	}
+
+	return &RunResponse{
+		ID:        payload.ID,
+		Status:    payload.Status,
+		Output:    payload.Output,
+		Error:     payload.Error,
+		SessionID: payload.SessionID,
+	}, nil
+}
+
+// RunAsync starts Claude execution asynchronously and returns a job ID.
+//
+// Use this method for long-running tasks. Poll the job status with
+// [Client.GetJob] or configure a webhook to be notified on completion.
+//
+// Basic usage:
+//
+//	job, err := client.RunAsync(ctx, &stromboli.RunRequest{
+//	    Prompt: "Analyze this large codebase",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Printf("Job started: %s\n", job.JobID)
+//
+// With webhook notification:
+//
+//	job, err := client.RunAsync(ctx, &stromboli.RunRequest{
+//	    Prompt:     "Review all files in the project",
+//	    WebhookURL: "https://example.com/webhook",
+//	})
+//
+// Polling for completion:
+//
+//	job, _ := client.RunAsync(ctx, req)
+//
+//	for {
+//	    status, err := client.GetJob(ctx, job.JobID)
+//	    if err != nil {
+//	        log.Fatal(err)
+//	    }
+//
+//	    switch status.Status {
+//	    case "completed":
+//	        fmt.Println(status.Output)
+//	        return
+//	    case "failed":
+//	        log.Fatalf("Job failed: %s", status.Error)
+//	    case "running":
+//	        fmt.Println("Still running...")
+//	        time.Sleep(2 * time.Second)
+//	    }
+//	}
+func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunResponse, error) {
+	if req == nil {
+		return nil, newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Prompt == "" {
+		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
+	}
+
+	// Convert to generated model
+	genReq := c.toGeneratedRunRequest(req)
+
+	// Create request parameters
+	params := execution.NewPostRunAsyncParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetRequest(genReq)
+
+	// Execute request
+	resp, err := c.api.Execution.PostRunAsync(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to start async execution")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty async run response", 0, nil)
+	}
+
+	return &AsyncRunResponse{
+		JobID: payload.JobID,
+	}, nil
+}
+
+// toGeneratedRunRequest converts our RunRequest to the generated model.
+func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
+	prompt := req.Prompt
+	genReq := &models.RunRequest{
+		Prompt:     &prompt,
+		Workdir:    req.Workdir,
+		WebhookURL: req.WebhookURL,
+	}
+
+	// Convert Claude options
+	if req.Claude != nil {
+		genReq.Claude.Model = req.Claude.Model
+		genReq.Claude.SessionID = req.Claude.SessionID
+		genReq.Claude.Resume = req.Claude.Resume
+		genReq.Claude.MaxBudgetUsd = req.Claude.MaxBudgetUSD
+		genReq.Claude.SystemPrompt = req.Claude.SystemPrompt
+		genReq.Claude.AppendSystemPrompt = req.Claude.AppendSystemPrompt
+		genReq.Claude.AllowedTools = req.Claude.AllowedTools
+		genReq.Claude.DisallowedTools = req.Claude.DisallowedTools
+		genReq.Claude.DangerouslySkipPermissions = req.Claude.DangerouslySkipPermissions
+		genReq.Claude.PermissionMode = req.Claude.PermissionMode
+		genReq.Claude.OutputFormat = req.Claude.OutputFormat
+		genReq.Claude.Verbose = req.Claude.Verbose
+		genReq.Claude.Debug = req.Claude.Debug
+		genReq.Claude.Continue = req.Claude.Continue
+		genReq.Claude.Agent = req.Claude.Agent
+		genReq.Claude.FallbackModel = req.Claude.FallbackModel
+	}
+
+	// Convert Podman options
+	if req.Podman != nil {
+		genReq.Podman.Memory = req.Podman.Memory
+		genReq.Podman.Timeout = req.Podman.Timeout
+		genReq.Podman.Cpus = req.Podman.Cpus
+		genReq.Podman.CPUShares = req.Podman.CPUShares
+		genReq.Podman.Volumes = req.Podman.Volumes
+		genReq.Podman.Image = req.Podman.Image
+		genReq.Podman.SecretsEnv = req.Podman.SecretsEnv
+	}
+
+	return genReq
 }
 
 // ----------------------------------------------------------------------------
