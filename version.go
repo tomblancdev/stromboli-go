@@ -179,7 +179,14 @@ func CheckCompatibility(serverVersion string) *CompatibilityResult {
 //	}
 func MustBeCompatible(serverVersion string) {
 	result := CheckCompatibility(serverVersion)
-	if result.Status != Compatible {
+	switch result.Status {
+	case Compatible:
+		return
+	case Unknown:
+		panic(fmt.Sprintf("stromboli: could not determine API compatibility: %s\n"+
+			"SDK version %s supports API versions %s.",
+			result.Message, Version, APIVersionRange))
+	default: // Incompatible
 		panic(fmt.Sprintf("stromboli: incompatible API version: %s\n"+
 			"SDK version %s supports API versions %s.\n"+
 			"Please upgrade your SDK or Stromboli server.",

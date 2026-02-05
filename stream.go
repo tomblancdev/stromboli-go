@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // maxErrorBodySize limits the size of error response bodies read from the server.
@@ -23,6 +24,12 @@ const maxErrorBodySize = 4096
 // memory exhaustion from malformed or malicious servers that might send
 // events without proper empty line delimiters. 1MB is generous for LLM
 // streaming output while providing protection against DoS attacks.
+//
+// NOTE: Due to bufio.ReadString behavior, a single line without newlines
+// will be fully allocated before the size check can reject it. This means
+// a malicious server could force allocation of up to maxEventSize bytes
+// per line. This is acceptable for trusted server environments but should
+// be considered when connecting to untrusted endpoints.
 const maxEventSize = 1 * 1024 * 1024 // 1MB
 
 // StreamRequest represents a request for streaming Claude output.
@@ -77,13 +84,28 @@ type StreamEvent struct {
 //	    log.Fatal(err)
 //	}
 type Stream struct {
-	resp    *http.Response
-	reader  *bufio.Reader
-	current *StreamEvent
-	errMu   sync.RWMutex // protects err field for concurrent access
-	err     error        // use setErr/getErr for thread-safe access
-	closed  atomic.Bool
-	cancel  context.CancelFunc // context cancel function for stream timeout
+	resp      *http.Response
+	reader    *bufio.Reader
+	currentMu sync.RWMutex // protects current field for thread-safe Event() access
+	current   *StreamEvent // use setCurrent/getCurrent for thread-safe access
+	errMu     sync.RWMutex // protects err field for concurrent access
+	err       error        // use setErr/getErr for thread-safe access
+	closed    atomic.Bool
+	cancel    context.CancelFunc // context cancel function for stream timeout
+}
+
+// setCurrent sets the current event (thread-safe).
+func (s *Stream) setCurrent(event *StreamEvent) {
+	s.currentMu.Lock()
+	defer s.currentMu.Unlock()
+	s.current = event
+}
+
+// getCurrent returns the current event (thread-safe).
+func (s *Stream) getCurrent() *StreamEvent {
+	s.currentMu.RLock()
+	defer s.currentMu.RUnlock()
+	return s.current
 }
 
 // setErr sets the error if not already set (thread-safe).
@@ -128,15 +150,23 @@ func (s *Stream) Next() bool {
 		return false
 	}
 
-	s.current = event
+	s.setCurrent(event)
 	return true
 }
 
 // Event returns the current event.
 //
-// Call this after [Stream.Next] returns true.
+// Call this after [Stream.Next] returns true. If called before the first
+// successful [Stream.Next] call, returns an empty event (not nil) to prevent
+// nil pointer dereferences.
+//
+// This method is thread-safe and can be called concurrently with [Stream.Next].
 func (s *Stream) Event() *StreamEvent {
-	return s.current
+	current := s.getCurrent()
+	if current == nil {
+		return &StreamEvent{} // Return empty event instead of nil for safety
+	}
+	return current
 }
 
 // Err returns any error that occurred during streaming.
@@ -218,11 +248,17 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 		done := make(chan struct{})
 
 		defer func() {
-			close(done) // Signal watcher to exit
+			// Signal watcher FIRST, before any operations that might block or panic.
+			// This ensures the watcher goroutine can exit cleanly even if subsequent
+			// operations fail. The done channel is unbuffered, so this is safe.
+			close(done)
+
+			// Recover from any panic in the reader goroutine
 			if r := recover(); r != nil {
 				// Only set error if not already set (preserve original error)
 				s.setErr(fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack()))
 			}
+
 			// Cleanup with defensive panic recovery to prevent double-panic
 			func() {
 				defer func() {
@@ -232,6 +268,7 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 				}()
 				cleanup()
 			}()
+
 			close(ch)
 		}()
 
@@ -251,9 +288,10 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 		}()
 
 		for s.Next() {
-			// Copy the event to avoid race condition when consumer
-			// reads while we iterate to the next event.
-			event := *s.current
+			// Get current event through thread-safe accessor and copy
+			// to avoid race condition when consumer reads while we iterate.
+			current := s.getCurrent()
+			event := *current
 			select {
 			case ch <- &event:
 			case <-ctx.Done():
@@ -324,9 +362,8 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 			return nil, fmt.Errorf("event exceeds maximum size of %d bytes", maxEventSize)
 		}
 
-		// Remove trailing newline
-		line = strings.TrimSuffix(line, "\n")
-		line = strings.TrimSuffix(line, "\r")
+		// Remove trailing line endings (handles \n, \r\n, \r, and any combination)
+		line = strings.TrimRight(line, "\r\n")
 
 		// Empty line marks end of event
 		if line == "" {
@@ -441,12 +478,15 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 			400, nil)
 	}
 
-	// Apply stream timeout if set and no context deadline exists.
+	// Apply stream timeout if set and context deadline is missing or longer.
 	// This prevents indefinite hangs when the server stops responding.
 	// The cancel function is stored in the Stream and called in Close().
 	var cancel context.CancelFunc
 	if c.streamTimeout > 0 {
-		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		deadline, hasDeadline := ctx.Deadline()
+		// Apply stream timeout if no deadline exists OR if the existing deadline
+		// is further away than our stream timeout (prefer the shorter timeout)
+		if !hasDeadline || time.Until(deadline) > c.streamTimeout {
 			ctx, cancel = context.WithTimeout(ctx, c.streamTimeout)
 		}
 	}
@@ -527,6 +567,8 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	if resp.StatusCode != http.StatusOK {
 		// Limit body read to prevent memory exhaustion from large error responses
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+		// Drain any remaining body to allow HTTP/1.1 connection reuse
+		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close() // Close explicitly instead of defer for clarity
 		cancelOnError()
 		return nil, newError(
@@ -540,7 +582,9 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Verify content type (case-insensitive per HTTP spec)
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
-		_ = resp.Body.Close() // Close explicitly instead of defer for clarity
+		// Drain body for HTTP/1.1 connection reuse before closing
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
 		cancelOnError()
 		return nil, newError(
 			"INVALID_RESPONSE",

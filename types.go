@@ -777,26 +777,34 @@ func (m *Message) ContentAsString() (string, bool) {
 // ContentAsBlocks returns the content as a slice of maps if it contains content blocks.
 // Returns nil and false if content is not in block format.
 //
-// WARNING: Non-map entries in the content array are silently skipped. If you need
-// to handle mixed content types, use json.Marshal/Unmarshal instead.
+// WARNING: Non-map entries in the content array are skipped. The returned int
+// indicates how many entries were skipped, allowing callers to detect data loss.
+// If skipped > 0, some content was not map-typed and was omitted from results.
+//
+// The ok return value indicates whether Content was in array format ([]interface{}),
+// NOT whether any blocks were found. An empty content array returns ok=true with
+// an empty blocks slice. Use ok=false to detect non-array content formats.
 //
 // For more precise typing, use json.Marshal/Unmarshal:
 //
 //	data, _ := json.Marshal(msg.Content)
 //	var blocks []YourBlockType
 //	json.Unmarshal(data, &blocks)
-func (m *Message) ContentAsBlocks() ([]map[string]interface{}, bool) {
-	blocks, ok := m.Content.([]interface{})
-	if !ok {
-		return nil, false
+func (m *Message) ContentAsBlocks() (blocks []map[string]interface{}, skipped int, ok bool) {
+	items, isArray := m.Content.([]interface{})
+	if !isArray {
+		return nil, 0, false
 	}
-	result := make([]map[string]interface{}, 0, len(blocks))
-	for _, b := range blocks {
-		if block, ok := b.(map[string]interface{}); ok {
-			result = append(result, block)
+	blocks = make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if block, isMap := item.(map[string]interface{}); isMap {
+			blocks = append(blocks, block)
+		} else {
+			skipped++
 		}
 	}
-	return result, len(result) > 0
+	// Return ok=true if Content was array format, even if empty
+	return blocks, skipped, true
 }
 
 // ----------------------------------------------------------------------------

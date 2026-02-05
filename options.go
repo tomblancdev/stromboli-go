@@ -100,7 +100,14 @@ func WithTimeout(d time.Duration) Option {
 //
 // Unlike regular requests, streams are long-running connections where data
 // arrives incrementally. This timeout applies only if no context deadline
-// is set when calling [Client.Stream].
+// is set when calling [Client.Stream], or if the existing deadline is further
+// away than this timeout.
+//
+// IMPORTANT: This is a TOTAL DURATION timeout, not an idle/inactivity timeout.
+// The stream will be cancelled after this duration regardless of whether data
+// is still being received. If you need idle detection (timeout when no data
+// arrives for a period), use [Stream.EventsWithContext] with periodic checks
+// or implement a custom wrapper with read deadlines.
 //
 // If not set, streaming requests have no timeout by default. This can be
 // dangerous as a stalled server may cause the client to hang indefinitely.
@@ -158,8 +165,8 @@ func WithRetries(n int) Option {
 // The provided client's Timeout field is ignored in favor of
 // [WithTimeout]. Use [WithTimeout] to control request timeouts.
 //
-// Passing nil is a no-op and the default client is retained.
-// This is typically a programmer error; consider checking for nil before calling.
+// Passing nil logs a warning and is ignored (the default client is retained).
+// This is typically a programmer error; check for nil before calling.
 //
 // Default: A new [http.Client] with cloned [http.DefaultTransport].
 //
@@ -177,10 +184,11 @@ func WithRetries(n int) Option {
 //	)
 func WithHTTPClient(httpClient *http.Client) Option {
 	return func(c *Client) {
-		if httpClient != nil {
-			c.httpClient = httpClient
+		if httpClient == nil {
+			getLogger().Printf("stromboli: WARNING: WithHTTPClient called with nil, ignoring")
+			return
 		}
-		// nil is silently ignored - default client is retained
+		c.httpClient = httpClient
 	}
 }
 
@@ -225,13 +233,10 @@ func WithUserAgent(userAgent string) Option {
 //	validation, err := client.ValidateToken(ctx)
 func WithToken(token string) Option {
 	return func(c *Client) {
-		// Validate token to prevent HTTP header injection via CR/LF characters.
-		// Empty string is valid (clears token), but non-empty tokens must be safe.
-		if token != "" && !isValidToken(token) {
-			getLogger().Printf("stromboli: WARNING: WithToken called with invalid token (contains control characters), ignoring")
-			return
-		}
-		c.token = token
+		// Delegate to SetToken for consistent validation and mutex usage.
+		// This ensures the same code path is used whether setting token via
+		// option or via SetToken method, making future refactoring safer.
+		c.SetToken(token)
 	}
 }
 
@@ -254,6 +259,10 @@ type ResponseHook func(resp *http.Response)
 // Use this for observability (logging, metrics) or to modify requests
 // before they are sent. Pass nil to clear a previously set hook.
 //
+// IMPORTANT: Hooks are captured at client creation time. Setting this option
+// AFTER calling [NewClient] will NOT affect API calls that use the internal
+// generated client. To use different hooks, create a new client.
+//
 // Example:
 //
 //	client, err := stromboli.NewClient(url,
@@ -272,6 +281,10 @@ func WithRequestHook(hook RequestHook) Option {
 // Use this for observability (logging, metrics) or to inspect response headers
 // and status codes. See [ResponseHook] for important caveats about body availability.
 // Pass nil to clear a previously set hook.
+//
+// IMPORTANT: Hooks are captured at client creation time. Setting this option
+// AFTER calling [NewClient] will NOT affect API calls that use the internal
+// generated client. To use different hooks, create a new client.
 //
 // Example:
 //

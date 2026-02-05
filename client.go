@@ -65,6 +65,9 @@ func getDefaultTransport() *http.Transport {
 			// sharing the custom transport across all clients.
 			getLogger().Printf("stromboli: WARNING: http.DefaultTransport is not *http.Transport, creating isolated transport")
 			defaultTransportCopy = &http.Transport{
+				// Match http.DefaultTransport settings for consistency
+				Proxy:                 http.ProxyFromEnvironment,
+				ForceAttemptHTTP2:     true,
 				MaxIdleConns:          100,
 				MaxIdleConnsPerHost:   10,
 				IdleConnTimeout:       90 * time.Second,
@@ -186,7 +189,10 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	}
 
 	// Clone the cached transport to give this client its own connection pool.
-	// This ensures clients don't interfere with each other's connections.
+	// This ensures clients don't interfere with each other's connections and
+	// provides isolation for concurrent operations. While this means connections
+	// aren't shared between clients (less efficient for many clients to same host),
+	// it prevents subtle bugs from shared transport state.
 	// getDefaultTransport() uses sync.Once to ensure thread-safe initialization.
 	if t := getDefaultTransport(); t != nil {
 		c.httpClient.Transport = t.Clone()
@@ -274,9 +280,10 @@ func (c *Client) effectiveTimeout(ctx context.Context) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			// Deadline already passed - return 0 to let the request
-			// fail immediately with context deadline exceeded error.
-			return 0
+			// Deadline already passed - return minimal positive duration to ensure
+			// immediate timeout. Using 1ns instead of 0 because some HTTP client
+			// implementations treat 0 as "no timeout" rather than "immediate timeout".
+			return 1 * time.Nanosecond
 		}
 		if remaining < timeout {
 			timeout = remaining
@@ -338,9 +345,10 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 
 	// Map components.
 	// Note: len(nil) returns 0 in Go, so this is safe even if Components is nil.
+	// Components with empty Name are skipped as they represent malformed data.
 	components := make([]ComponentHealth, 0, len(payload.Components))
 	for _, comp := range payload.Components {
-		if comp != nil {
+		if comp != nil && comp.Name != "" {
 			components = append(components, ComponentHealth{
 				Name:   comp.Name,
 				Status: comp.Status,
@@ -1045,7 +1053,8 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 		if opts.Limit > 0 {
 			params.SetLimit(&opts.Limit)
 		}
-		// Note: Offset == 0 is valid (start from beginning), so > 0 check is correct
+		// Offset 0 means start from beginning; omitting it has the same effect,
+		// so we only send offset when positive (for pagination beyond first page)
 		if opts.Offset > 0 {
 			params.SetOffset(&opts.Offset)
 		}
@@ -1199,10 +1208,10 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) er
 	status := apiErr.Code
 
 	// Extract the most useful error message:
-	// 1. Try the API error's message
+	// 1. Try the API error's message if non-empty
 	// 2. Fall back to the provided fallback message
 	serverMsg := fallbackMsg
-	if msg := apiErr.Error(); msg != "" && msg != fmt.Sprintf("[%d] ", status) {
+	if msg := apiErr.Error(); msg != "" {
 		serverMsg = msg
 	}
 
@@ -1250,6 +1259,21 @@ func (c *Client) getToken() string {
 // This token is used for endpoints that require authentication,
 // such as [Client.ValidateToken] and [Client.Logout].
 // SetToken is safe for concurrent use.
+//
+// # Token Validation
+//
+// Tokens are validated to prevent HTTP header injection attacks. If a token
+// contains control characters (CR, LF, or other characters < 0x20), the token
+// is rejected and a warning is logged. The previous token remains unchanged.
+// This is a security measure - valid JWT tokens never contain these characters.
+//
+// To check if a token was accepted, call [Client.getToken] after setting,
+// or use [Client.ValidateToken] to verify with the server.
+//
+// # Empty Token
+//
+// Passing an empty string clears the token. Use [Client.ClearToken] for a
+// more explicit way to remove the token.
 //
 // Example:
 //
@@ -1996,7 +2020,11 @@ func validateRequestSize(req *RunRequest) error {
 //
 // WARNING: This does NOT validate JSON Schema compliance. It only checks:
 //   - The string is valid JSON
-//   - At least one recognized schema keyword exists
+//   - At least one structural schema keyword exists (type, properties, items, etc.)
+//
+// Metadata-only schemas (e.g., {"title": "My Schema"}) are rejected because they
+// don't provide structural validation. If you need metadata-only schemas, add a
+// "type" field or use a proper JSON Schema validator.
 //
 // Invalid schemas WILL pass this check and fail server-side.
 // For production use, pre-validate schemas with a JSON Schema library such as:
@@ -2009,31 +2037,49 @@ func validateJSONSchema(schema string) error {
 		return fmt.Errorf("not valid JSON: %w", err)
 	}
 
-	// Check for at least one valid JSON Schema keyword.
-	// This list covers the most common structural keywords from JSON Schema
-	// draft-07 and later. It's intentionally broad to avoid rejecting
-	// valid schemas while still catching obvious non-schemas like {"foo": 1}.
-	validKeywords := []string{
-		// Type keywords
+	// Validate "type" keyword if present - must be string or array of strings
+	if typeVal, hasType := s["type"]; hasType {
+		switch v := typeVal.(type) {
+		case string:
+			// Valid: "type": "object"
+		case []interface{}:
+			// Valid: "type": ["string", "null"] - verify all elements are strings
+			for i, elem := range v {
+				if _, isString := elem.(string); !isString {
+					return fmt.Errorf("'type' array element %d must be a string", i)
+				}
+			}
+		default:
+			return fmt.Errorf("'type' must be a string or array of strings")
+		}
+	}
+
+	// Require at least one STRUCTURAL keyword that actually constrains output.
+	// Metadata keywords (title, description, $comment) alone don't provide
+	// meaningful validation, so we don't accept schemas with only those.
+	structuralKeywords := []string{
+		// Type constraints
 		"type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const",
-		// Object keywords
+		// Object structure
 		"properties", "required", "additionalProperties", "patternProperties",
-		// Array keywords
+		// Array structure
 		"items", "additionalItems", "contains",
 		// Schema composition
 		"definitions", "$defs", "not", "if", "then", "else",
-		// Validation keywords
+		// Value validation
 		"minimum", "maximum", "minLength", "maxLength", "pattern",
 		"minItems", "maxItems", "uniqueItems",
 		"minProperties", "maxProperties",
+		"multipleOf", "exclusiveMinimum", "exclusiveMaximum",
+		"format",
 	}
-	for _, keyword := range validKeywords {
+	for _, keyword := range structuralKeywords {
 		if _, ok := s[keyword]; ok {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("schema must contain at least one JSON Schema keyword (type, properties, items, etc.)")
+	return fmt.Errorf("schema must contain at least one structural JSON Schema keyword (type, properties, items, $ref, etc.)")
 }
 
 // isValidTokenChar returns true if the token contains only valid HTTP header characters.
