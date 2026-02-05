@@ -31,27 +31,27 @@ func TestIsCompatible(t *testing.T) {
 	}{
 		{
 			name:       "exact target version",
-			version:    "0.3.0-alpha",
+			version:    "0.4.0-alpha",
 			compatible: true,
 		},
 		{
 			name:       "patch version in range",
-			version:    "0.3.1",
+			version:    "0.4.1",
 			compatible: true,
 		},
 		{
 			name:       "minor version in range",
-			version:    "0.3.5",
+			version:    "0.4.5",
 			compatible: true,
 		},
 		{
 			name:       "version too old",
-			version:    "0.2.0",
+			version:    "0.3.0",
 			compatible: false,
 		},
 		{
 			name:       "version too new",
-			version:    "0.4.0",
+			version:    "0.5.0",
 			compatible: false,
 		},
 		{
@@ -85,10 +85,10 @@ func TestCheckCompatibility_Compatible(t *testing.T) {
 		name    string
 		version string
 	}{
-		{"exact version", "0.3.0-alpha"},
-		{"patch version", "0.3.1"},
-		{"minor patch", "0.3.99"},
-		{"with prerelease", "0.3.1-beta"},
+		{"exact version", "0.4.0-alpha"},
+		{"patch version", "0.4.1"},
+		{"minor patch", "0.4.99"},
+		{"with prerelease", "0.4.1-beta"},
 	}
 
 	for _, tt := range tests {
@@ -112,8 +112,8 @@ func TestCheckCompatibility_Incompatible(t *testing.T) {
 		name    string
 		version string
 	}{
-		{"too old", "0.2.0"},
-		{"too new minor", "0.4.0"},
+		{"too old", "0.3.0"},
+		{"too new minor", "0.5.0"},
 		{"too new major", "1.0.0"},
 		{"way too old", "0.1.0"},
 	}
@@ -175,7 +175,7 @@ func TestCompatibilityStatus_String(t *testing.T) {
 func TestMustBeCompatible_Compatible(t *testing.T) {
 	// Should not panic
 	require.NotPanics(t, func() {
-		stromboli.MustBeCompatible("0.3.0-alpha")
+		stromboli.MustBeCompatible("0.4.0-alpha")
 	})
 }
 
@@ -197,9 +197,9 @@ func TestMustBeCompatible_Invalid(t *testing.T) {
 
 // TestCompatibilityResult_Fields tests all fields are populated correctly.
 func TestCompatibilityResult_Fields(t *testing.T) {
-	result := stromboli.CheckCompatibility("0.3.0-alpha")
+	result := stromboli.CheckCompatibility("0.4.0-alpha")
 
-	assert.Equal(t, "0.3.0-alpha", result.ServerVersion)
+	assert.Equal(t, "0.4.0-alpha", result.ServerVersion)
 	assert.Equal(t, stromboli.Version, result.SDKVersion)
 	assert.Equal(t, stromboli.APIVersion, result.TargetAPIVersion)
 	assert.Equal(t, stromboli.APIVersionRange, result.SupportedRange)

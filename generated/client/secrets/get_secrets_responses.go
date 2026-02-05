@@ -49,7 +49,7 @@ func NewGetSecretsOK() *GetSecretsOK {
 /*
 GetSecretsOK describes a response with status code 200, with default header values.
 
-OK
+List of secrets (empty array if none exist)
 */
 type GetSecretsOK struct {
 	Payload *models.SecretsListResponse
@@ -119,7 +119,7 @@ func NewGetSecretsInternalServerError() *GetSecretsInternalServerError {
 /*
 GetSecretsInternalServerError describes a response with status code 500, with default header values.
 
-Internal Server Error
+Internal server error
 */
 type GetSecretsInternalServerError struct {
 	Payload *models.SecretsListResponse

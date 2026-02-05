@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,7 @@ func TestHealth_Success(t *testing.T) {
 		resp := map[string]interface{}{
 			"name":    "stromboli",
 			"status":  "ok",
-			"version": "0.3.0-alpha",
+			"version": "0.4.0-alpha",
 			"components": []map[string]interface{}{
 				{"name": "podman", "status": "ok", "error": ""},
 			},
@@ -68,7 +69,7 @@ func TestHealth_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stromboli", health.Name)
 	assert.Equal(t, "ok", health.Status)
-	assert.Equal(t, "0.3.0-alpha", health.Version)
+	assert.Equal(t, "0.4.0-alpha", health.Version)
 	assert.True(t, health.IsHealthy())
 	assert.Len(t, health.Components, 1)
 	assert.Equal(t, "podman", health.Components[0].Name)
@@ -82,7 +83,7 @@ func TestHealth_Unhealthy(t *testing.T) {
 		resp := map[string]interface{}{
 			"name":    "stromboli",
 			"status":  "error",
-			"version": "0.3.0-alpha",
+			"version": "0.4.0-alpha",
 			"components": []map[string]interface{}{
 				{"name": "podman", "status": "error", "error": "podman not found"},
 			},
@@ -209,8 +210,8 @@ func TestNewClient_Options(t *testing.T) {
 	customHTTPClient := &http.Client{}
 
 	client, err := stromboli.NewClient("http://localhost:8585",
-		stromboli.WithTimeout(60),
-		stromboli.WithRetries(3),
+		stromboli.WithTimeout(60*time.Second),
+		stromboli.WithRetries(3), //nolint:staticcheck // Testing deprecated option still works
 		stromboli.WithHTTPClient(customHTTPClient),
 		stromboli.WithUserAgent("test-agent/1.0"),
 	)
@@ -1682,9 +1683,13 @@ func TestListSecrets_Success(t *testing.T) {
 		assert.Equal(t, "/secrets", r.URL.Path)
 		assert.Equal(t, http.MethodGet, r.Method)
 
-		// Return mock response
+		// Return mock response with full secret objects
 		resp := map[string]interface{}{
-			"secrets": []string{"github-token", "gitlab-token", "npm-token"},
+			"secrets": []map[string]interface{}{
+				{"id": "abc123", "name": "github-token", "created_at": "2024-01-15T10:30:00Z"},
+				{"id": "def456", "name": "gitlab-token", "created_at": "2024-01-15T10:31:00Z"},
+				{"id": "ghi789", "name": "npm-token", "created_at": "2024-01-15T10:32:00Z"},
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		mustEncode(w, resp)
@@ -1699,9 +1704,10 @@ func TestListSecrets_Success(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	assert.Len(t, secrets, 3)
-	assert.Contains(t, secrets, "github-token")
-	assert.Contains(t, secrets, "gitlab-token")
-	assert.Contains(t, secrets, "npm-token")
+	assert.Equal(t, "github-token", secrets[0].Name)
+	assert.Equal(t, "abc123", secrets[0].ID)
+	assert.Equal(t, "gitlab-token", secrets[1].Name)
+	assert.Equal(t, "npm-token", secrets[2].Name)
 }
 
 // TestListSecrets_Empty tests ListSecrets when no secrets exist.
@@ -1709,7 +1715,7 @@ func TestListSecrets_Empty(t *testing.T) {
 	// Arrange
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
-			"secrets": []string{},
+			"secrets": []map[string]interface{}{},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		mustEncode(w, resp)
@@ -1731,7 +1737,7 @@ func TestListSecrets_Error(t *testing.T) {
 	// Arrange
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
-			"secrets": []string{},
+			"secrets": []map[string]interface{}{},
 			"error":   "podman not available",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1752,6 +1758,558 @@ func TestListSecrets_Error(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "SECRETS_ERROR", apiErr.Code)
 	assert.Contains(t, apiErr.Message, "podman not available")
+}
+
+// TestCreateSecret_Success tests the CreateSecret method.
+func TestCreateSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+		assert.Equal(t, "my-secret", req["name"])
+		assert.Equal(t, "secret-value", req["value"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"success": true,
+			"name":    "my-secret",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.CreateSecret(context.Background(), &stromboli.CreateSecretRequest{
+		Name:  "my-secret",
+		Value: "secret-value",
+	})
+
+	// Assert
+	require.NoError(t, err)
+}
+
+// TestCreateSecret_EmptyName tests CreateSecret with an empty name.
+func TestCreateSecret_EmptyName(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	err = client.CreateSecret(context.Background(), &stromboli.CreateSecretRequest{
+		Name:  "",
+		Value: "value",
+	})
+
+	// Assert
+	require.Error(t, err)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestGetSecret_Success tests the GetSecret method.
+func TestGetSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets/github-token", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":         "abc123",
+			"name":       "github-token",
+			"created_at": "2024-01-15T10:30:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	secret, err := client.GetSecret(context.Background(), "github-token")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "abc123", secret.ID)
+	assert.Equal(t, "github-token", secret.Name)
+	assert.Equal(t, "2024-01-15T10:30:00Z", secret.CreatedAt)
+}
+
+// TestGetSecret_NotFound tests GetSecret with a non-existent secret.
+func TestGetSecret_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "secret not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	secret, err := client.GetSecret(context.Background(), "unknown")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, secret)
+}
+
+// TestDeleteSecret_Success tests the DeleteSecret method.
+func TestDeleteSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets/github-token", r.URL.Path)
+		assert.Equal(t, http.MethodDelete, r.Method)
+
+		// Return success
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, map[string]interface{}{"success": true})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.DeleteSecret(context.Background(), "github-token")
+
+	// Assert
+	require.NoError(t, err)
+}
+
+// TestDeleteSecret_EmptyName tests DeleteSecret with an empty name.
+func TestDeleteSecret_EmptyName(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	err = client.DeleteSecret(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// ============================================================================
+// Images Tests
+// ============================================================================
+
+// TestListImages_Success tests the ListImages method.
+func TestListImages_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"images": []map[string]interface{}{
+				{
+					"id":                 "sha256:abc123",
+					"repository":         "python",
+					"tag":                "3.12-slim",
+					"size":               125000000,
+					"compatible":         true,
+					"compatibility_rank": 2,
+				},
+				{
+					"id":                 "sha256:def456",
+					"repository":         "alpine",
+					"tag":                "latest",
+					"compatible":         false,
+					"compatibility_rank": 4,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	images, err := client.ListImages(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, images, 2)
+	assert.Equal(t, "python", images[0].Repository)
+	assert.Equal(t, "3.12-slim", images[0].Tag)
+	assert.True(t, images[0].Compatible)
+	assert.Equal(t, int64(2), images[0].CompatibilityRank)
+	assert.False(t, images[1].Compatible)
+}
+
+// TestListImages_Empty tests ListImages when no images exist.
+func TestListImages_Empty(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"images": []map[string]interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	images, err := client.ListImages(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Empty(t, images)
+}
+
+// TestGetImage_Success tests the GetImage method.
+func TestGetImage_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/python:3.12", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":                 "sha256:abc123def456",
+			"repository":         "python",
+			"tag":                "3.12",
+			"size":               125000000,
+			"compatible":         true,
+			"compatibility_rank": 2,
+			"tools":              []string{"python", "pip"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	image, err := client.GetImage(context.Background(), "python:3.12")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:abc123def456", image.ID)
+	assert.Equal(t, "python", image.Repository)
+	assert.True(t, image.Compatible)
+	assert.Contains(t, image.Tools, "python")
+}
+
+// TestGetImage_NotFound tests GetImage with a non-existent image.
+func TestGetImage_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "image not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	image, err := client.GetImage(context.Background(), "nonexistent:latest")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, image)
+}
+
+// TestSearchImages_Success tests the SearchImages method.
+func TestSearchImages_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/search", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "python", r.URL.Query().Get("q"))
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"results": []map[string]interface{}{
+				{
+					"name":        "python",
+					"description": "Python is an interpreted programming language",
+					"stars":       8500,
+					"official":    true,
+				},
+				{
+					"name":        "pypy",
+					"description": "PyPy is a fast Python implementation",
+					"stars":       500,
+					"official":    false,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	results, err := client.SearchImages(context.Background(), &stromboli.SearchImagesOptions{
+		Query: "python",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	assert.Equal(t, "python", results[0].Name)
+	assert.Equal(t, int64(8500), results[0].Stars)
+	assert.True(t, results[0].Official)
+}
+
+// TestSearchImages_EmptyQuery tests SearchImages with an empty query.
+func TestSearchImages_EmptyQuery(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	results, err := client.SearchImages(context.Background(), &stromboli.SearchImagesOptions{
+		Query: "",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, results)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestPullImage_Success tests the PullImage method.
+func TestPullImage_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/pull", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+		assert.Equal(t, "python:3.12-slim", req["image"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"success":  true,
+			"image":    "python:3.12-slim",
+			"image_id": "sha256:abc123def456",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.PullImage(context.Background(), &stromboli.PullImageRequest{
+		Image: "python:3.12-slim",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "python:3.12-slim", result.Image)
+	assert.Equal(t, "sha256:abc123def456", result.ImageID)
+}
+
+// TestPullImage_EmptyImage tests PullImage with an empty image name.
+func TestPullImage_EmptyImage(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	result, err := client.PullImage(context.Background(), &stromboli.PullImageRequest{
+		Image: "",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, result)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestRun_WithLifecycleHooks tests Run with lifecycle hooks.
+func TestRun_WithLifecycleHooks(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Podman options with lifecycle
+		podman, ok := req["podman"].(map[string]interface{})
+		require.True(t, ok)
+		lifecycle, ok := podman["lifecycle"].(map[string]interface{})
+		require.True(t, ok)
+
+		onCreate, ok := lifecycle["on_create_command"].([]interface{})
+		require.True(t, ok)
+		assert.Contains(t, onCreate, "pip install -r requirements.txt")
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-hooks123",
+			"status": "completed",
+			"output": "Task completed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Run with hooks",
+		Podman: &stromboli.PodmanOptions{
+			Lifecycle: &stromboli.LifecycleHooks{
+				OnCreateCommand: []string{"pip install -r requirements.txt"},
+				PostStart:       []string{"redis-server --daemonize yes"},
+				HooksTimeout:    "5m",
+			},
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_WithComposeEnvironment tests Run with compose environment.
+func TestRun_WithComposeEnvironment(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Podman options with environment
+		podman, ok := req["podman"].(map[string]interface{})
+		require.True(t, ok)
+		env, ok := podman["environment"].(map[string]interface{})
+		require.True(t, ok)
+
+		assert.Equal(t, "compose", env["type"])
+		assert.Equal(t, "/path/to/docker-compose.yml", env["path"])
+		assert.Equal(t, "dev", env["service"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-compose123",
+			"status": "completed",
+			"output": "Task completed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Run with compose",
+		Podman: &stromboli.PodmanOptions{
+			Environment: &stromboli.EnvironmentConfig{
+				Type:    "compose",
+				Path:    "/path/to/docker-compose.yml",
+				Service: "dev",
+			},
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_NewClaudeOptionsFields tests that v0.4.0-alpha ClaudeOptions fields
+// are correctly serialized in requests.
+func TestRun_NewClaudeOptionsFields(t *testing.T) {
+	// Arrange
+	var receivedRequest map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/run" {
+			mustDecode(r, &receivedRequest)
+			// Return success response
+			resp := map[string]interface{}{
+				"id":     "run-v040",
+				"status": "completed",
+				"output": "test output",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			mustEncode(w, resp)
+		}
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "test prompt",
+		Claude: &stromboli.ClaudeOptions{
+			AddDirs:              []string{"/data", "/config"},
+			Betas:                []string{"beta-feature-1", "beta-feature-2"},
+			DisableSlashCommands: true,
+			Files:                []string{"file1.txt:path1", "file2.txt:path2"},
+			McpConfigs:           []string{"mcp-config.json"},
+			Tools:                []string{"Bash", "Read", "Write"},
+			ForkSession:          true,
+			NoPersistence:        true,
+			PluginDirs:           []string{"/plugins"},
+			InputFormat:          "text",
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+
+	// Verify new v0.4.0-alpha fields were serialized correctly
+	claude, ok := receivedRequest["claude"].(map[string]interface{})
+	require.True(t, ok, "claude options should be present")
+
+	assert.Equal(t, []interface{}{"/data", "/config"}, claude["add_dirs"])
+	assert.Equal(t, []interface{}{"beta-feature-1", "beta-feature-2"}, claude["betas"])
+	assert.Equal(t, true, claude["disable_slash_commands"])
+	assert.Equal(t, []interface{}{"file1.txt:path1", "file2.txt:path2"}, claude["files"])
+	assert.Equal(t, []interface{}{"mcp-config.json"}, claude["mcp_configs"])
+	assert.Equal(t, []interface{}{"Bash", "Read", "Write"}, claude["tools"])
+	assert.Equal(t, true, claude["fork_session"])
+	assert.Equal(t, true, claude["no_persistence"])
+	assert.Equal(t, []interface{}{"/plugins"}, claude["plugin_dirs"])
+	assert.Equal(t, "text", claude["input_format"])
 }
 
 // ============================================================================
@@ -1933,7 +2491,7 @@ func TestStream_EventsChannel(t *testing.T) {
 
 	// Collect events via channel
 	events := make([]*stromboli.StreamEvent, 0, 3)
-	for event := range stream.Events() {
+	for event := range stream.Events() { //nolint:staticcheck // Testing deprecated method still works
 		events = append(events, event)
 	}
 
@@ -2041,4 +2599,319 @@ func TestStream_ContextCancellation(t *testing.T) {
 
 	// Next should return false (stream closed due to cancellation)
 	assert.False(t, stream.Next())
+}
+
+// TestStream_CloseMultipleTimes tests that Stream.Close is safe to call multiple times.
+func TestStream_CloseMultipleTimes(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "data: test\n\n")
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "test",
+	})
+	require.NoError(t, err)
+
+	// Close multiple times should be safe (no panic, no error)
+	err1 := stream.Close()
+	err2 := stream.Close()
+	err3 := stream.Close()
+
+	// Assert - all calls should succeed
+	assert.NoError(t, err1)
+	assert.NoError(t, err2)
+	assert.NoError(t, err3)
+}
+
+// TestStream_EventsWithContext tests the EventsWithContext method for avoiding goroutine leaks.
+func TestStream_EventsWithContext(t *testing.T) {
+	// Arrange: Server sends multiple events slowly
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		for i := 0; i < 10; i++ {
+			_, _ = fmt.Fprintf(w, "data: Event %d\n\n", i)
+			flusher.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "test",
+	})
+	require.NoError(t, err)
+	defer func() { _ = stream.Close() }()
+
+	// Create a context we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Always clean up the context
+	ch := stream.EventsWithContext(ctx)
+
+	// Read just 2 events
+	count := 0
+	for event := range ch {
+		count++
+		assert.Contains(t, event.Data, "Event")
+		if count >= 2 {
+			cancel() // Cancel after 2 events
+			break
+		}
+	}
+
+	// Verify we got the events we expected
+	assert.Equal(t, 2, count)
+}
+
+// ============================================================================
+// Code Review Fix Tests
+// ============================================================================
+
+// TestNewClient_SafeTransportCloning tests that NewClient doesn't panic
+// when DefaultTransport is not a *http.Transport.
+func TestNewClient_SafeTransportCloning(t *testing.T) {
+	// Save original transport
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+
+	// Set a non-*http.Transport transport
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("mock transport")
+	})
+
+	// This should NOT panic
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestValidateJSONSchema_ValidSchemas tests JSON schema validation with valid schemas.
+func TestValidateJSONSchema_ValidSchemas(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+	}{
+		{"with type", `{"type":"object"}`},
+		{"with $ref", `{"$ref":"#/definitions/Foo"}`},
+		{"with oneOf", `{"oneOf":[{"type":"string"},{"type":"number"}]}`},
+		{"with anyOf", `{"anyOf":[{"type":"string"},{"type":"number"}]}`},
+		{"with allOf", `{"allOf":[{"type":"object"},{"required":["id"]}]}`},
+		{"with enum", `{"enum":["a","b","c"]}`},
+		{"with const", `{"const":"fixed-value"}`},
+		{"complex schema", `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]interface{}{
+					"id":     "run-123",
+					"status": "completed",
+					"output": "{}",
+				}
+				w.Header().Set("Content-Type", "application/json")
+				mustEncode(w, resp)
+			}))
+			defer server.Close()
+
+			// Act
+			client, err := stromboli.NewClient(server.URL)
+			require.NoError(t, err)
+			_, err = client.Run(context.Background(), &stromboli.RunRequest{
+				Prompt: "test",
+				Claude: &stromboli.ClaudeOptions{
+					JSONSchema: tt.schema,
+				},
+			})
+
+			// Assert - no validation error
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestValidateJSONSchema_InvalidSchemas tests JSON schema validation with invalid schemas.
+func TestValidateJSONSchema_InvalidSchemas(t *testing.T) {
+	tests := []struct {
+		name        string
+		schema      string
+		errContains string
+	}{
+		{"invalid JSON", `{not json}`, "not valid JSON"},
+		{"missing schema keyword", `{"foo":"bar"}`, "JSON Schema keyword"},
+		{"empty object", `{}`, "JSON Schema keyword"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			client, err := stromboli.NewClient("http://localhost:8585")
+			require.NoError(t, err)
+
+			// Act
+			_, err = client.Run(context.Background(), &stromboli.RunRequest{
+				Prompt: "test",
+				Claude: &stromboli.ClaudeOptions{
+					JSONSchema: tt.schema,
+				},
+			})
+
+			// Assert
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+
+			var apiErr *stromboli.Error
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+		})
+	}
+}
+
+// TestError_RateLimited tests the ErrRateLimited sentinel error.
+func TestError_RateLimited(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		mustEncode(w, map[string]string{"error": "rate limited"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	_, err = client.Health(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, stromboli.ErrRateLimited))
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "RATE_LIMITED", apiErr.Code)
+}
+
+// TestWithRequestHook tests that request hooks are called.
+func TestWithRequestHook(t *testing.T) {
+	// Arrange
+	hookCalled := false
+	var capturedMethod string
+	var capturedPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"name":       "stromboli",
+			"status":     "ok",
+			"version":    "0.4.0-alpha",
+			"components": []interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL,
+		stromboli.WithRequestHook(func(req *http.Request) {
+			hookCalled = true
+			capturedMethod = req.Method
+			capturedPath = req.URL.Path
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = client.Health(context.Background())
+	require.NoError(t, err)
+
+	// Assert
+	assert.True(t, hookCalled, "request hook should be called")
+	assert.Equal(t, http.MethodGet, capturedMethod)
+	assert.Equal(t, "/health", capturedPath)
+}
+
+// TestWithResponseHook tests that response hooks are called.
+func TestWithResponseHook(t *testing.T) {
+	// Arrange
+	hookCalled := false
+	var capturedStatusCode int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"name":       "stromboli",
+			"status":     "ok",
+			"version":    "0.4.0-alpha",
+			"components": []interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL,
+		stromboli.WithResponseHook(func(resp *http.Response) {
+			hookCalled = true
+			capturedStatusCode = resp.StatusCode
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = client.Health(context.Background())
+	require.NoError(t, err)
+
+	// Assert
+	assert.True(t, hookCalled, "response hook should be called")
+	assert.Equal(t, http.StatusOK, capturedStatusCode)
+}
+
+// TestWithRetries_LogsWarning tests that WithRetries logs a deprecation warning.
+// Note: We can't easily test log output, so we just verify it doesn't panic.
+func TestWithRetries_LogsWarning(t *testing.T) {
+	// This should not panic, just log a warning
+	client, err := stromboli.NewClient("http://localhost:8585",
+		stromboli.WithRetries(3), //nolint:staticcheck // Testing deprecated option
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+// TestRunResponse_IsSuccess_UsesConstants tests that IsSuccess uses status constants.
+func TestRunResponse_IsSuccess_UsesConstants(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		expected bool
+	}{
+		{"completed status", stromboli.RunStatusCompleted, true},
+		{"error status", stromboli.RunStatusError, false},
+		{"random status", "random", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &stromboli.RunResponse{Status: tt.status}
+			assert.Equal(t, tt.expected, resp.IsSuccess())
+		})
+	}
 }

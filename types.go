@@ -1,5 +1,7 @@
 package stromboli
 
+import "time"
+
 // ----------------------------------------------------------------------------
 // System Types
 // ----------------------------------------------------------------------------
@@ -159,7 +161,7 @@ type ClaudeOptions struct {
 	// Model specifies the Claude model to use.
 	// Use the Model* constants: ModelHaiku, ModelSonnet, ModelOpus.
 	// Default: server-configured default (usually sonnet).
-	Model string `json:"model,omitempty"`
+	Model Model `json:"model,omitempty"`
 
 	// SessionID enables conversation continuation.
 	// Pass a previous response's SessionID to continue the conversation.
@@ -246,6 +248,67 @@ type ClaudeOptions struct {
 	// FallbackModel is used when the primary model is overloaded.
 	// Example: "haiku"
 	FallbackModel string `json:"fallback_model,omitempty"`
+
+	// AddDirs specifies additional directories for tool access.
+	// Example: []string{"/home/user/shared", "/data"}
+	AddDirs []string `json:"add_dirs,omitempty"`
+
+	// Agents specifies custom agents definition (JSON object).
+	// Example: map[string]interface{}{"reviewer": ...}
+	Agents map[string]interface{} `json:"agents,omitempty"`
+
+	// AllowDangerouslySkipPermissions enables bypass as an option without enabling by default.
+	AllowDangerouslySkipPermissions bool `json:"allow_dangerously_skip_permissions,omitempty"`
+
+	// Betas specifies beta headers for API requests.
+	// Example: []string{"interleaved-thinking-2025-05-14"}
+	Betas []string `json:"betas,omitempty"`
+
+	// DisableSlashCommands disables all slash commands/skills.
+	DisableSlashCommands bool `json:"disable_slash_commands,omitempty"`
+
+	// Files specifies file resources in format: file_id:path.
+	// Example: []string{"abc123:/workspace/file.txt"}
+	Files []string `json:"files,omitempty"`
+
+	// ForkSession creates a new session ID when resuming.
+	ForkSession bool `json:"fork_session,omitempty"`
+
+	// IncludePartialMessages includes partial message chunks (stream-json only).
+	IncludePartialMessages bool `json:"include_partial_messages,omitempty"`
+
+	// InputFormat specifies the input format: text, stream-json.
+	// Example: "text"
+	InputFormat string `json:"input_format,omitempty"`
+
+	// McpConfigs specifies MCP server config files or JSON strings.
+	// Example: []string{"/path/to/mcp.json"}
+	McpConfigs []string `json:"mcp_configs,omitempty"`
+
+	// NoPersistence prevents saving session to disk.
+	NoPersistence bool `json:"no_persistence,omitempty"`
+
+	// PluginDirs specifies plugin directories.
+	// Example: []string{"/home/user/.claude/plugins"}
+	PluginDirs []string `json:"plugin_dirs,omitempty"`
+
+	// ReplayUserMessages re-emits user messages on stdout.
+	ReplayUserMessages bool `json:"replay_user_messages,omitempty"`
+
+	// SettingSources specifies setting sources to load: user, project, local.
+	// Example: []string{"user", "project"}
+	SettingSources []string `json:"setting_sources,omitempty"`
+
+	// Settings specifies path to settings JSON file or JSON string.
+	// Example: "/path/to/settings.json"
+	Settings string `json:"settings,omitempty"`
+
+	// StrictMcpConfig only uses MCP servers from mcp_configs.
+	StrictMcpConfig bool `json:"strict_mcp_config,omitempty"`
+
+	// Tools specifies built-in tools ("", "default", or specific names).
+	// Example: []string{"Bash", "Read", "Edit"}
+	Tools []string `json:"tools,omitempty"`
 }
 
 // PodmanOptions configures the container execution environment.
@@ -293,19 +356,100 @@ type PodmanOptions struct {
 	// The secret must exist (created via `podman secret create`).
 	// Example: map[string]string{"GH_TOKEN": "github-token"}
 	SecretsEnv map[string]string `json:"secrets_env,omitempty"`
+
+	// Lifecycle configures commands to run at specific container lifecycle stages.
+	// See [LifecycleHooks] for available hooks.
+	Lifecycle *LifecycleHooks `json:"lifecycle,omitempty"`
+
+	// Environment specifies a compose-based multi-service environment.
+	// When set, the agent runs inside the specified service of the compose stack.
+	// See [EnvironmentConfig] for configuration options.
+	Environment *EnvironmentConfig `json:"environment,omitempty"`
+}
+
+// LifecycleHooks configures commands to run at specific container lifecycle stages.
+//
+// Use these hooks to set up the container environment before Claude starts,
+// such as installing dependencies, starting background services, etc.
+//
+// Example:
+//
+//	&stromboli.LifecycleHooks{
+//	    OnCreateCommand: []string{"pip install -r requirements.txt"},
+//	    PostStart:       []string{"redis-server --daemonize yes"},
+//	    HooksTimeout:    "5m",
+//	}
+type LifecycleHooks struct {
+	// OnCreateCommand runs after container creation, before Claude starts (first run only).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"pip install -r requirements.txt"}
+	OnCreateCommand []string `json:"on_create_command,omitempty"`
+
+	// PostCreate runs after OnCreateCommand completes (first run only).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"npm run setup"}
+	PostCreate []string `json:"post_create,omitempty"`
+
+	// PostStart runs after container starts (every run, including continues).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"redis-server --daemonize yes"}
+	PostStart []string `json:"post_start,omitempty"`
+
+	// HooksTimeout is the maximum duration for all hooks combined.
+	// If not specified, hooks run with the container's timeout.
+	// Examples: "5m", "30s"
+	HooksTimeout string `json:"hooks_timeout,omitempty"`
+}
+
+// EnvironmentConfig specifies a compose-based multi-service environment.
+//
+// When set, the agent runs inside the specified service of a Docker Compose
+// stack instead of a standalone container. This allows running Claude
+// in complex multi-container environments.
+//
+// Example:
+//
+//	&stromboli.EnvironmentConfig{
+//	    Type:    "compose",
+//	    Path:    "/home/user/project/docker-compose.yml",
+//	    Service: "dev",
+//	}
+type EnvironmentConfig struct {
+	// Type of environment: "" (default single container) or "compose".
+	// Example: "compose"
+	Type string `json:"type,omitempty"`
+
+	// Path to compose file (required when Type="compose").
+	// Must be an absolute path ending in .yml or .yaml.
+	// Example: "/home/user/project/docker-compose.yml"
+	Path string `json:"path,omitempty"`
+
+	// Service name where Claude will run (required when Type="compose").
+	// Example: "dev"
+	Service string `json:"service,omitempty"`
+
+	// BuildTimeout is the optional build timeout override for compose.
+	// If not specified, uses server default (10m).
+	// Examples: "15m", "30m"
+	BuildTimeout string `json:"build_timeout,omitempty"`
 }
 
 // RunResponse represents the result of a synchronous Claude execution.
+//
+// Important: A nil error from [Client.Run] means the API call succeeded,
+// not necessarily that Claude execution succeeded. Always check Status
+// and Error fields to determine if the execution completed successfully.
 //
 // Check Status to determine if execution succeeded:
 //
 //	result, err := client.Run(ctx, req)
 //	if err != nil {
-//	    log.Fatal(err)
+//	    log.Fatal(err) // API call failed
 //	}
 //	if result.IsSuccess() {
 //	    fmt.Println(result.Output)
 //	} else {
+//	    // Execution failed - check result.Error for details
 //	    fmt.Printf("Execution failed: %s\n", result.Error)
 //	}
 type RunResponse struct {
@@ -330,7 +474,7 @@ type RunResponse struct {
 
 // IsSuccess returns true if the execution completed successfully.
 func (r *RunResponse) IsSuccess() bool {
-	return r.Status == "completed"
+	return r.Status == RunStatusCompleted
 }
 
 // AsyncRunResponse represents the result of starting an async execution.
@@ -436,6 +580,32 @@ func (j *Job) IsPending() bool {
 	return j.Status == JobStatusPending
 }
 
+// CreatedAtTime parses CreatedAt as time.Time.
+// Returns zero time if CreatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, j.CreatedAt) directly.
+func (j *Job) CreatedAtTime() time.Time {
+	if j.CreatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, j.CreatedAt)
+	return t
+}
+
+// UpdatedAtTime parses UpdatedAt as time.Time.
+// Returns zero time if UpdatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, j.UpdatedAt) directly.
+func (j *Job) UpdatedAtTime() time.Time {
+	if j.UpdatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, j.UpdatedAt)
+	return t
+}
+
 // CrashInfo contains details about a job crash.
 //
 // This is populated when a job terminates unexpectedly due to
@@ -452,6 +622,13 @@ type CrashInfo struct {
 	// PartialOutput contains any output captured before the crash.
 	// This can help debug what the job was doing when it crashed.
 	PartialOutput string `json:"partial_output,omitempty"`
+
+	// Signal is the signal that killed the process (if applicable).
+	// Examples: "SIGSEGV", "SIGKILL", "SIGTERM"
+	Signal string `json:"signal,omitempty"`
+
+	// TaskCompleted indicates whether the task appeared to complete before crashing.
+	TaskCompleted bool `json:"task_completed,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
@@ -480,7 +657,7 @@ type GetMessagesOptions struct {
 //
 //	resp, _ := client.GetMessages(ctx, "sess-abc123", nil)
 //	for _, msg := range resp.Messages {
-//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	    fmt.Printf("[%s] %s\n", msg.Type, msg.UUID)
 //	}
 //
 //	if resp.HasMore {
@@ -542,16 +719,328 @@ type Message struct {
 	Version string `json:"version,omitempty"`
 
 	// Content contains the message content (text, tool calls, etc.).
-	// The structure varies by message type.
+	// The structure varies by message type:
+	//   - For "user" messages: string or []ContentBlock
+	//   - For "assistant" messages: []ContentBlock with text and tool_use
+	//
+	// Use type assertions or json.Marshal/Unmarshal to work with this field.
+	//
+	// Example:
+	//
+	//	// Check if content is a simple string
+	//	if text, ok := msg.Content.(string); ok {
+	//	    fmt.Println(text)
+	//	}
+	//
+	//	// For complex content, marshal and unmarshal
+	//	data, _ := json.Marshal(msg.Content)
+	//	var blocks []map[string]interface{}
+	//	json.Unmarshal(data, &blocks)
 	Content interface{} `json:"content,omitempty"`
 
 	// ToolResult contains tool use results (for tool_result messages).
+	// The structure is typically:
+	//   - ToolUseID: string - The ID of the tool use this result responds to
+	//   - Content: string or []ContentBlock - The result data
+	//   - IsError: bool - Whether this result represents an error
+	//
+	// Use type assertions or json.Marshal/Unmarshal to work with this field.
 	ToolResult interface{} `json:"tool_result,omitempty"`
+}
+
+// TimestampTime parses Timestamp as time.Time.
+// Returns zero time if Timestamp is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, m.Timestamp) directly.
+func (m *Message) TimestampTime() time.Time {
+	if m.Timestamp == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, m.Timestamp)
+	return t
+}
+
+// ContentAsString returns the content as a string if it is a simple string message.
+// Returns empty string and false if content is not a string.
+//
+// Example:
+//
+//	if text, ok := msg.ContentAsString(); ok {
+//	    fmt.Println(text)
+//	}
+func (m *Message) ContentAsString() (string, bool) {
+	s, ok := m.Content.(string)
+	return s, ok
+}
+
+// ContentAsBlocks returns the content as a slice of maps if it contains content blocks.
+// Returns nil and false if content is not in block format.
+//
+// WARNING: Non-map entries in the content array are skipped. The returned int
+// indicates how many entries were skipped, allowing callers to detect data loss.
+// If skipped > 0, some content was not map-typed and was omitted from results.
+//
+// The ok return value indicates whether Content was in array format ([]interface{}),
+// NOT whether any blocks were found. An empty content array returns ok=true with
+// an empty blocks slice. Use ok=false to detect non-array content formats.
+//
+// For more precise typing, use json.Marshal/Unmarshal:
+//
+//	data, _ := json.Marshal(msg.Content)
+//	var blocks []YourBlockType
+//	json.Unmarshal(data, &blocks)
+func (m *Message) ContentAsBlocks() (blocks []map[string]interface{}, skipped int, ok bool) {
+	items, isArray := m.Content.([]interface{})
+	if !isArray {
+		return nil, 0, false
+	}
+	blocks = make([]map[string]interface{}, 0, len(items))
+	for _, item := range items {
+		if block, isMap := item.(map[string]interface{}); isMap {
+			blocks = append(blocks, block)
+		} else {
+			skipped++
+		}
+	}
+	// Return ok=true if Content was array format, even if empty
+	return blocks, skipped, true
+}
+
+// ----------------------------------------------------------------------------
+// Secrets Types
+// ----------------------------------------------------------------------------
+
+// Secret represents a Podman secret's metadata.
+//
+// Secrets are used to securely pass sensitive data (API keys, tokens, etc.)
+// to containers without exposing them in environment variables or command lines.
+//
+// Use [Client.CreateSecret] to create a new secret:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+type Secret struct {
+	// ID is the unique identifier of the secret.
+	// Example: "abc123def456"
+	ID string `json:"id,omitempty"`
+
+	// Name is the secret name used to reference it.
+	// Example: "github-token"
+	Name string `json:"name"`
+
+	// CreatedAt is when the secret was created (RFC3339 format).
+	// Example: "2024-01-15T10:30:00Z"
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// CreatedAtTime parses CreatedAt as time.Time.
+// Returns zero time if CreatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, s.CreatedAt) directly.
+func (s *Secret) CreatedAtTime() time.Time {
+	if s.CreatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, s.CreatedAt)
+	return t
+}
+
+// CreateSecretRequest represents a request to create a new Podman secret.
+//
+// Use with [Client.CreateSecret]:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+type CreateSecretRequest struct {
+	// Name is the secret name (required).
+	// Must be unique among existing secrets.
+	// Example: "github-token"
+	Name string `json:"name"`
+
+	// Value is the secret data (required).
+	// This value is stored securely and never returned by the API.
+	// Example: "ghp_xxxx..."
+	Value string `json:"value"`
+}
+
+// ----------------------------------------------------------------------------
+// Images Types
+// ----------------------------------------------------------------------------
+
+// Image represents a local container image with compatibility information.
+//
+// Use [Client.ListImages] to list all available images:
+//
+//	images, err := client.ListImages(ctx)
+//	for _, img := range images {
+//	    fmt.Printf("%s:%s (rank %d)\n", img.Repository, img.Tag, img.CompatibilityRank)
+//	}
+type Image struct {
+	// ID is the image ID (usually sha256:...).
+	// Example: "sha256:abc123def456"
+	ID string `json:"id,omitempty"`
+
+	// Repository is the image repository name.
+	// Example: "python"
+	Repository string `json:"repository,omitempty"`
+
+	// Tag is the image tag.
+	// Example: "3.12-slim"
+	Tag string `json:"tag,omitempty"`
+
+	// Size is the image size in bytes.
+	// Example: 125000000
+	Size int64 `json:"size,omitempty"`
+
+	// Created is when the image was created (RFC3339 format).
+	// Example: "2024-01-15T10:30:00Z"
+	Created string `json:"created,omitempty"`
+
+	// Description is a human-readable description of the image.
+	// Example: "Python development image"
+	Description string `json:"description,omitempty"`
+
+	// Compatible indicates if the image is compatible with Stromboli.
+	// Images with glibc are compatible; Alpine/musl images are not.
+	Compatible bool `json:"compatible,omitempty"`
+
+	// CompatibilityRank indicates the image's compatibility level.
+	// 1-2: Verified compatible, 3: Standard glibc, 4: Incompatible (Alpine/musl)
+	CompatibilityRank int64 `json:"compatibility_rank,omitempty"`
+
+	// HasClaudeCLI indicates if the image has Claude CLI pre-installed.
+	HasClaudeCLI bool `json:"has_claude_cli,omitempty"`
+
+	// Tools lists tools available in the image.
+	// Example: []string{"python", "pip", "git"}
+	Tools []string `json:"tools,omitempty"`
+}
+
+// CreatedTime parses Created as time.Time.
+// Returns zero time if Created is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, i.Created) directly.
+func (i *Image) CreatedTime() time.Time {
+	if i.Created == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, i.Created)
+	return t
+}
+
+// ImageSearchResult represents a search result from a container registry.
+//
+// Use [Client.SearchImages] to search registries:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query: "python",
+//	    Limit: 10,
+//	})
+//	for _, r := range results {
+//	    fmt.Printf("%s: %s (stars: %d)\n", r.Name, r.Description, r.Stars)
+//	}
+type ImageSearchResult struct {
+	// Name is the image name.
+	// Example: "python"
+	Name string `json:"name,omitempty"`
+
+	// Description is the image description from the registry.
+	// Example: "Python is an interpreted programming language"
+	Description string `json:"description,omitempty"`
+
+	// Stars is the number of stars on the registry.
+	// Example: 8500
+	Stars int64 `json:"stars,omitempty"`
+
+	// Official indicates if this is an official image.
+	Official bool `json:"official,omitempty"`
+
+	// Automated indicates if this image is automatically built.
+	Automated bool `json:"automated,omitempty"`
+
+	// Index is the registry index (e.g., "docker.io").
+	// Example: "docker.io"
+	Index string `json:"index,omitempty"`
+}
+
+// SearchImagesOptions configures an image search request.
+//
+// Example:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query:   "python",
+//	    Limit:   25,
+//	    NoTrunc: true,
+//	})
+type SearchImagesOptions struct {
+	// Query is the search term (required).
+	// Example: "python"
+	Query string
+
+	// Limit is the maximum number of results to return.
+	// Default varies by registry.
+	Limit int64
+
+	// NoTrunc disables truncation of output.
+	NoTrunc bool
+}
+
+// PullImageRequest represents a request to pull a container image.
+//
+// Use with [Client.PullImage]:
+//
+//	result, err := client.PullImage(ctx, &stromboli.PullImageRequest{
+//	    Image:    "python:3.12-slim",
+//	    Platform: "linux/amd64",
+//	})
+type PullImageRequest struct {
+	// Image is the image reference to pull (required).
+	// Example: "python:3.12-slim"
+	Image string `json:"image"`
+
+	// Platform specifies the platform for multi-arch images.
+	// Example: "linux/amd64", "linux/arm64"
+	Platform string `json:"platform,omitempty"`
+
+	// Quiet suppresses pull progress output.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// PullImageResponse represents the result of an image pull operation.
+type PullImageResponse struct {
+	// Success indicates if the pull was successful.
+	Success bool `json:"success,omitempty"`
+
+	// Image is the pulled image reference.
+	// Example: "python:3.12-slim"
+	Image string `json:"image,omitempty"`
+
+	// ImageID is the pulled image's ID.
+	// Example: "sha256:abc123def456"
+	ImageID string `json:"image_id,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
 // Constants
 // ----------------------------------------------------------------------------
+
+// Model represents a Claude model identifier.
+//
+// The SDK provides constants for common models (ModelHaiku, ModelSonnet, ModelOpus).
+// For newer models not yet added to the SDK, you can cast any string to Model:
+//
+//	customModel := stromboli.Model("claude-3-5-sonnet-20241022")
+//
+// Model values are passed directly to the API, so you can use any model
+// identifier supported by the Stromboli server.
+type Model string
 
 // Model constants for Claude model selection.
 //
@@ -563,16 +1052,21 @@ type Message struct {
 const (
 	// ModelHaiku is the fastest and most cost-effective model.
 	// Best for simple tasks, quick responses, and high-volume use cases.
-	ModelHaiku = "haiku"
+	ModelHaiku Model = "haiku"
 
 	// ModelSonnet is the balanced model for most use cases.
 	// Good balance of speed, capability, and cost.
-	ModelSonnet = "sonnet"
+	ModelSonnet Model = "sonnet"
 
 	// ModelOpus is the most capable model.
 	// Best for complex reasoning, nuanced tasks, and highest quality output.
-	ModelOpus = "opus"
+	ModelOpus Model = "opus"
 )
+
+// String returns the string representation of the Model.
+func (m Model) String() string {
+	return string(m)
+}
 
 // RunStatus constants for execution results.
 const (

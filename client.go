@@ -2,6 +2,7 @@ package stromboli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
 	"github.com/tomblancdev/stromboli-go/generated/client/auth"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
+	"github.com/tomblancdev/stromboli-go/generated/client/images"
 	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
 	"github.com/tomblancdev/stromboli-go/generated/client/secrets"
 	"github.com/tomblancdev/stromboli-go/generated/client/sessions"
@@ -28,16 +30,60 @@ const (
 	// defaultTimeout is the default request timeout.
 	defaultTimeout = 30 * time.Second
 
-	// defaultMaxRetries is the default number of retry attempts.
-	defaultMaxRetries = 0
+	// maxPromptSize limits the maximum prompt size to prevent memory exhaustion.
+	// 1MB chosen based on Claude's typical context window (~200k tokens ≈ 800KB text)
+	// with headroom for encoding overhead.
+	maxPromptSize = 1 * 1024 * 1024 // 1MB
+
+	// maxSystemPromptSize limits the maximum system prompt size.
+	// System prompts are typically much shorter than user prompts.
+	// 256KB allows for detailed instructions while maintaining safety.
+	maxSystemPromptSize = 256 * 1024 // 256KB
+
+	// maxJSONSchemaSize limits the maximum JSON schema size.
+	// Most schemas are small (<10KB), but complex nested schemas can be larger.
+	// 64KB accommodates all reasonable use cases.
+	maxJSONSchemaSize = 64 * 1024 // 64KB
 )
+
+var (
+	// defaultTransportOnce ensures we only clone DefaultTransport once.
+	// This prevents potential races if DefaultTransport is modified concurrently.
+	defaultTransportOnce sync.Once
+	defaultTransportCopy *http.Transport
+)
+
+// getDefaultTransport returns a cached transport for client isolation.
+// This is safe to call from multiple goroutines.
+func getDefaultTransport() *http.Transport {
+	defaultTransportOnce.Do(func() {
+		if t, ok := http.DefaultTransport.(*http.Transport); ok {
+			defaultTransportCopy = t.Clone()
+		} else {
+			// http.DefaultTransport was replaced with a custom implementation.
+			// Create a fresh transport to ensure client isolation rather than
+			// sharing the custom transport across all clients.
+			getLogger().Printf("stromboli: WARNING: http.DefaultTransport is not *http.Transport, creating isolated transport")
+			defaultTransportCopy = &http.Transport{
+				// Match http.DefaultTransport settings for consistency
+				Proxy:                 http.ProxyFromEnvironment,
+				ForceAttemptHTTP2:     true,
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			}
+		}
+	})
+	return defaultTransportCopy
+}
 
 // Client is the Stromboli API client.
 //
 // Client provides a clean, idiomatic Go interface to the Stromboli API.
 // It wraps the auto-generated client with additional features:
 //   - Context support for cancellation and timeouts
-//   - Automatic retries with exponential backoff
 //   - Typed errors for common failure cases
 //   - Simplified request/response types
 //
@@ -78,8 +124,9 @@ type Client struct {
 	// timeout is the default request timeout.
 	timeout time.Duration
 
-	// maxRetries is the maximum number of retry attempts.
-	maxRetries int
+	// streamTimeout is the default timeout for streaming requests.
+	// If set and no context deadline exists, this timeout is applied.
+	streamTimeout time.Duration
 
 	// userAgent is the User-Agent header value.
 	userAgent string
@@ -92,6 +139,12 @@ type Client struct {
 
 	// api is the generated API client.
 	api *generatedclient.StromboliAPI
+
+	// requestHook is called before each HTTP request (optional).
+	requestHook RequestHook
+
+	// responseHook is called after each HTTP response (optional).
+	responseHook ResponseHook
 }
 
 // NewClient creates a new Stromboli API client.
@@ -107,7 +160,6 @@ type Client struct {
 //
 //	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
-//	    stromboli.WithRetries(3),
 //	    stromboli.WithHTTPClient(customHTTPClient),
 //	)
 //	if err != nil {
@@ -131,10 +183,19 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 
 	c := &Client{
 		baseURL:    baseURL,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{},
 		timeout:    defaultTimeout,
-		maxRetries: defaultMaxRetries,
 		userAgent:  fmt.Sprintf("stromboli-go/%s", Version),
+	}
+
+	// Clone the cached transport to give this client its own connection pool.
+	// This ensures clients don't interfere with each other's connections and
+	// provides isolation for concurrent operations. While this means connections
+	// aren't shared between clients (less efficient for many clients to same host),
+	// it prevents subtle bugs from shared transport state.
+	// getDefaultTransport() uses sync.Once to ensure thread-safe initialization.
+	if t := getDefaultTransport(); t != nil {
+		c.httpClient.Transport = t.Clone()
 	}
 
 	// Apply options
@@ -148,24 +209,46 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// userAgentTransport wraps http.RoundTripper to add User-Agent header.
+// userAgentTransport wraps http.RoundTripper to add User-Agent header and invoke hooks.
 type userAgentTransport struct {
-	base      http.RoundTripper
-	userAgent string
+	base         http.RoundTripper
+	userAgent    string
+	requestHook  RequestHook
+	responseHook ResponseHook
 }
 
 // RoundTrip implements http.RoundTripper.
 func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", t.userAgent)
+
+	// Call request hook unconditionally - request is always valid at this point.
+	if t.requestHook != nil {
+		t.requestHook(req)
+	}
+
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return base.RoundTrip(req)
+	resp, err := base.RoundTrip(req)
+
+	// Call response hook only if we have a response.
+	// On network errors, resp may be nil, so we skip the hook.
+	// This asymmetry is intentional: request hooks fire for all requests,
+	// response hooks fire only for successful network round-trips.
+	if t.responseHook != nil && resp != nil {
+		t.responseHook(resp)
+	}
+
+	return resp, err
 }
 
 // newGeneratedClient creates the underlying go-swagger client.
+//
+// NOTE: Request and response hooks are captured at client creation time.
+// Changing hooks after client creation has no effect on the generated API client.
+// To use different hooks, create a new client.
 func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
 	// URL already validated in NewClient
 	u, _ := url.Parse(c.baseURL)
@@ -176,15 +259,37 @@ func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
 		schemes = []string{"http"}
 	}
 
-	// Create transport with user agent
+	// Create transport with user agent and hooks
 	transport := httptransport.New(u.Host, u.Path, schemes)
 	transport.Transport = &userAgentTransport{
-		base:      c.httpClient.Transport,
-		userAgent: c.userAgent,
+		base:         c.httpClient.Transport,
+		userAgent:    c.userAgent,
+		requestHook:  c.requestHook,
+		responseHook: c.responseHook,
 	}
 
 	// Create client
 	return generatedclient.New(transport, strfmt.Default)
+}
+
+// effectiveTimeout returns the shorter of the client timeout and context deadline.
+// This ensures the documented behavior where the effective timeout is the minimum
+// of the client's configured timeout and the context's deadline.
+func (c *Client) effectiveTimeout(ctx context.Context) time.Duration {
+	timeout := c.timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			// Deadline already passed - return minimal positive duration to ensure
+			// immediate timeout. Using 1ns instead of 0 because some HTTP client
+			// implementations treat 0 as "no timeout" rather than "immediate timeout".
+			return 1 * time.Nanosecond
+		}
+		if remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
 }
 
 // ----------------------------------------------------------------------------
@@ -224,7 +329,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	// Create request parameters with context
 	params := system.NewGetHealthParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.System.GetHealth(params)
@@ -238,10 +343,12 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 		return nil, newError("INVALID_RESPONSE", "empty health response", 0, nil)
 	}
 
-	// Map components
+	// Map components.
+	// Note: len(nil) returns 0 in Go, so this is safe even if Components is nil.
+	// Components with empty Name are skipped as they represent malformed data.
 	components := make([]ComponentHealth, 0, len(payload.Components))
 	for _, comp := range payload.Components {
-		if comp != nil {
+		if comp != nil && comp.Name != "" {
 			components = append(components, ComponentHealth{
 				Name:   comp.Name,
 				Status: comp.Status,
@@ -285,7 +392,7 @@ func (c *Client) ClaudeStatus(ctx context.Context) (*ClaudeStatus, error) {
 	// Create request parameters with context
 	params := system.NewGetClaudeStatusParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.System.GetClaudeStatus(params)
@@ -357,6 +464,15 @@ func (c *Client) ClaudeStatus(ctx context.Context) (*ClaudeStatus, error) {
 //	    },
 //	})
 //
+// # Timeout Behavior
+//
+// The effective request timeout is determined by the shorter of:
+//   - The client's configured timeout (via [WithTimeout])
+//   - The context's deadline (if set via [context.WithTimeout])
+//
+// For long-running tasks, either increase the client timeout or use
+// [Client.RunAsync] instead.
+//
 // The context can be used for cancellation:
 //
 //	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -370,13 +486,30 @@ func (c *Client) Run(ctx context.Context, req *RunRequest) (*RunResponse, error)
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate request size limits
+	if err := validateRequestSize(req); err != nil {
+		return nil, err
+	}
+
+	// Validate JSON schema if provided
+	if req.Claude != nil && req.Claude.JSONSchema != "" {
+		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
+			return nil, newError("BAD_REQUEST", fmt.Sprintf("invalid JSON schema: %v", err), 400, nil)
+		}
+	}
+
+	// Validate Resume requires SessionID
+	if req.Claude != nil && req.Claude.Resume && req.Claude.SessionID == "" {
+		return nil, newError("BAD_REQUEST", "session_id is required when resume is true", 400, nil)
+	}
+
 	// Convert to generated model
-	genReq := c.toGeneratedRunRequest(req)
+	genReq := toGeneratedRunRequest(req)
 
 	// Create request parameters
 	params := execution.NewPostRunParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(genReq)
 
 	// Execute request
@@ -451,13 +584,30 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate request size limits
+	if err := validateRequestSize(req); err != nil {
+		return nil, err
+	}
+
+	// Validate JSON schema if provided
+	if req.Claude != nil && req.Claude.JSONSchema != "" {
+		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
+			return nil, newError("BAD_REQUEST", fmt.Sprintf("invalid JSON schema: %v", err), 400, nil)
+		}
+	}
+
+	// Validate Resume requires SessionID
+	if req.Claude != nil && req.Claude.Resume && req.Claude.SessionID == "" {
+		return nil, newError("BAD_REQUEST", "session_id is required when resume is true", 400, nil)
+	}
+
 	// Convert to generated model
-	genReq := c.toGeneratedRunRequest(req)
+	genReq := toGeneratedRunRequest(req)
 
 	// Create request parameters
 	params := execution.NewPostRunAsyncParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(genReq)
 
 	// Execute request
@@ -477,8 +627,9 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 	}, nil
 }
 
-// toGeneratedRunRequest converts our RunRequest to the generated model.
-func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
+// toGeneratedRunRequest converts a RunRequest to the generated model for API calls.
+// It maps all Claude and Podman options to their corresponding generated types.
+func toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 	prompt := req.Prompt
 	genReq := &models.RunRequest{
 		Prompt:     &prompt,
@@ -486,36 +637,77 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 		WebhookURL: req.WebhookURL,
 	}
 
-	// Convert Claude options
+	// Convert Claude options - only populate if user provided them
 	if req.Claude != nil {
-		genReq.Claude.Model = req.Claude.Model
-		genReq.Claude.SessionID = req.Claude.SessionID
-		genReq.Claude.Resume = req.Claude.Resume
-		genReq.Claude.MaxBudgetUsd = req.Claude.MaxBudgetUSD
-		genReq.Claude.SystemPrompt = req.Claude.SystemPrompt
-		genReq.Claude.AppendSystemPrompt = req.Claude.AppendSystemPrompt
-		genReq.Claude.AllowedTools = req.Claude.AllowedTools
-		genReq.Claude.DisallowedTools = req.Claude.DisallowedTools
-		genReq.Claude.DangerouslySkipPermissions = req.Claude.DangerouslySkipPermissions
-		genReq.Claude.PermissionMode = req.Claude.PermissionMode
-		genReq.Claude.OutputFormat = req.Claude.OutputFormat
-		genReq.Claude.JSONSchema = req.Claude.JSONSchema
-		genReq.Claude.Verbose = req.Claude.Verbose
-		genReq.Claude.Debug = req.Claude.Debug
-		genReq.Claude.Continue = req.Claude.Continue
-		genReq.Claude.Agent = req.Claude.Agent
-		genReq.Claude.FallbackModel = req.Claude.FallbackModel
+		genReq.Claude = models.StromboliInternalTypesClaudeOptions{
+			Model:                           string(req.Claude.Model),
+			SessionID:                       req.Claude.SessionID,
+			Resume:                          req.Claude.Resume,
+			MaxBudgetUsd:                    req.Claude.MaxBudgetUSD,
+			SystemPrompt:                    req.Claude.SystemPrompt,
+			AppendSystemPrompt:              req.Claude.AppendSystemPrompt,
+			AllowedTools:                    req.Claude.AllowedTools,
+			DisallowedTools:                 req.Claude.DisallowedTools,
+			DangerouslySkipPermissions:      req.Claude.DangerouslySkipPermissions,
+			PermissionMode:                  req.Claude.PermissionMode,
+			OutputFormat:                    req.Claude.OutputFormat,
+			JSONSchema:                      req.Claude.JSONSchema,
+			Verbose:                         req.Claude.Verbose,
+			Debug:                           req.Claude.Debug,
+			Continue:                        req.Claude.Continue,
+			Agent:                           req.Claude.Agent,
+			FallbackModel:                   req.Claude.FallbackModel,
+			AddDirs:                         req.Claude.AddDirs,
+			Agents:                          req.Claude.Agents,
+			AllowDangerouslySkipPermissions: req.Claude.AllowDangerouslySkipPermissions,
+			Betas:                           req.Claude.Betas,
+			DisableSlashCommands:            req.Claude.DisableSlashCommands,
+			Files:                           req.Claude.Files,
+			ForkSession:                     req.Claude.ForkSession,
+			IncludePartialMessages:          req.Claude.IncludePartialMessages,
+			InputFormat:                     req.Claude.InputFormat,
+			McpConfigs:                      req.Claude.McpConfigs,
+			NoPersistence:                   req.Claude.NoPersistence,
+			PluginDirs:                      req.Claude.PluginDirs,
+			ReplayUserMessages:              req.Claude.ReplayUserMessages,
+			SettingSources:                  req.Claude.SettingSources,
+			Settings:                        req.Claude.Settings,
+			StrictMcpConfig:                 req.Claude.StrictMcpConfig,
+			Tools:                           req.Claude.Tools,
+		}
 	}
 
-	// Convert Podman options
+	// Convert Podman options - only populate if user provided them
 	if req.Podman != nil {
-		genReq.Podman.Memory = req.Podman.Memory
-		genReq.Podman.Timeout = req.Podman.Timeout
-		genReq.Podman.Cpus = req.Podman.Cpus
-		genReq.Podman.CPUShares = req.Podman.CPUShares
-		genReq.Podman.Volumes = req.Podman.Volumes
-		genReq.Podman.Image = req.Podman.Image
-		genReq.Podman.SecretsEnv = req.Podman.SecretsEnv
+		genReq.Podman = models.StromboliInternalTypesPodmanOptions{
+			Memory:     req.Podman.Memory,
+			Timeout:    req.Podman.Timeout,
+			Cpus:       req.Podman.Cpus,
+			CPUShares:  req.Podman.CPUShares,
+			Volumes:    req.Podman.Volumes,
+			Image:      req.Podman.Image,
+			SecretsEnv: req.Podman.SecretsEnv,
+		}
+
+		// Only set nested structs if user provided them
+		if req.Podman.Lifecycle != nil {
+			genReq.Podman.Lifecycle = models.StromboliInternalTypesLifecycleHooks{
+				OnCreateCommand: req.Podman.Lifecycle.OnCreateCommand,
+				PostCreate:      req.Podman.Lifecycle.PostCreate,
+				PostStart:       req.Podman.Lifecycle.PostStart,
+				HooksTimeout:    req.Podman.Lifecycle.HooksTimeout,
+			}
+		}
+
+		// Only set environment config if user provided it
+		if req.Podman.Environment != nil {
+			genReq.Podman.Environment = models.StromboliInternalTypesEnvironmentConfig{
+				Type:         req.Podman.Environment.Type,
+				Path:         req.Podman.Environment.Path,
+				Service:      req.Podman.Environment.Service,
+				BuildTimeout: req.Podman.Environment.BuildTimeout,
+			}
+		}
 	}
 
 	return genReq
@@ -554,7 +746,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]*Job, error) {
 	// Create request parameters with context
 	params := jobs.NewGetJobsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Jobs.GetJobs(params)
@@ -572,7 +764,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]*Job, error) {
 	result := make([]*Job, 0, len(payload.Jobs))
 	for _, j := range payload.Jobs {
 		if j != nil {
-			result = append(result, c.fromGeneratedJobResponse(j))
+			result = append(result, fromGeneratedJobResponse(j))
 		}
 	}
 
@@ -620,7 +812,7 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	// Create request parameters with context
 	params := jobs.NewGetJobsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(jobID)
 
 	// Execute request
@@ -635,7 +827,7 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		return nil, newError("INVALID_RESPONSE", "empty job response", 0, nil)
 	}
 
-	return c.fromGeneratedJobResponse(payload), nil
+	return fromGeneratedJobResponse(payload), nil
 }
 
 // CancelJob cancels a pending or running job.
@@ -673,7 +865,7 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	// Create request parameters with context
 	params := jobs.NewDeleteJobsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(jobID)
 
 	// Execute request
@@ -685,8 +877,9 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// fromGeneratedJobResponse converts a generated JobResponse to our Job type.
-func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
+// fromGeneratedJobResponse converts a generated JobResponse model to the SDK Job type.
+// It handles the mapping of all fields including optional crash info.
+func fromGeneratedJobResponse(j *models.JobResponse) *Job {
 	job := &Job{
 		ID:        j.ID,
 		Status:    string(j.Status),
@@ -703,6 +896,8 @@ func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
 			Reason:        j.CrashInfo.Reason,
 			ExitCode:      j.CrashInfo.ExitCode,
 			PartialOutput: j.CrashInfo.PartialOutput,
+			Signal:        j.CrashInfo.Signal,
+			TaskCompleted: j.CrashInfo.TaskCompleted,
 		}
 	}
 
@@ -743,7 +938,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 	// Create request parameters with context
 	params := sessions.NewGetSessionsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Sessions.GetSessions(params)
@@ -793,7 +988,7 @@ func (c *Client) DestroySession(ctx context.Context, sessionID string) error {
 	// Create request parameters with context
 	params := sessions.NewDeleteSessionsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 
 	// Execute request
@@ -818,7 +1013,7 @@ func (c *Client) DestroySession(ctx context.Context, sessionID string) error {
 //	}
 //
 //	for _, msg := range messages.Messages {
-//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	    fmt.Printf("[%s] %s\n", msg.Type, msg.UUID)
 //	}
 //
 // With pagination:
@@ -843,14 +1038,23 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 	// Create request parameters with context
 	params := sessions.NewGetSessionsIDMessagesParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 
 	// Apply options if provided
 	if opts != nil {
+		// Validate negative values - catch client-side for better error messages
+		if opts.Limit < 0 {
+			return nil, newError("BAD_REQUEST", "limit cannot be negative", 400, nil)
+		}
+		if opts.Offset < 0 {
+			return nil, newError("BAD_REQUEST", "offset cannot be negative", 400, nil)
+		}
 		if opts.Limit > 0 {
 			params.SetLimit(&opts.Limit)
 		}
+		// Offset 0 means start from beginning; omitting it has the same effect,
+		// so we only send offset when positive (for pagination beyond first page)
 		if opts.Offset > 0 {
 			params.SetOffset(&opts.Offset)
 		}
@@ -872,7 +1076,7 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 	messages := make([]*Message, 0, len(payload.Messages))
 	for _, m := range payload.Messages {
 		if m != nil {
-			messages = append(messages, c.fromGeneratedMessage(m))
+			messages = append(messages, fromGeneratedMessage(m))
 		}
 	}
 
@@ -897,7 +1101,7 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 //	    log.Fatal(err)
 //	}
 //
-//	fmt.Printf("Role: %s\n", msg.Role)
+//	fmt.Printf("Role: %s\n", msg.Type)
 //	fmt.Printf("Content: %v\n", msg.Content)
 func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*Message, error) {
 	if sessionID == "" {
@@ -910,7 +1114,7 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 	// Create request parameters with context
 	params := sessions.NewGetSessionsIDMessagesMessageIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 	params.SetMessageID(messageID)
 
@@ -926,11 +1130,12 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 		return nil, newError("INVALID_RESPONSE", "empty message response", 0, nil)
 	}
 
-	return c.fromGeneratedMessage(payload.Message), nil
+	return fromGeneratedMessage(payload.Message), nil
 }
 
-// fromGeneratedMessage converts a generated message to our Message type.
-func (c *Client) fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
+// fromGeneratedMessage converts a generated message model to the SDK Message type.
+// Note: Content and ToolResult are exposed as interface{} for flexibility.
+func fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
 	return &Message{
 		UUID:           m.UUID,
 		Type:           string(m.Type),
@@ -983,29 +1188,44 @@ func (c *Client) handleError(err error, message string) error {
 	return wrapError(err, "REQUEST_FAILED", message, 0)
 }
 
+// httpStatusToErrorCode maps HTTP status codes to error codes for table-driven error handling.
+var httpStatusToErrorCode = map[int]string{
+	http.StatusBadRequest:          ErrBadRequest.Code,
+	http.StatusUnauthorized:        ErrUnauthorized.Code,
+	http.StatusForbidden:           "FORBIDDEN",
+	http.StatusNotFound:            ErrNotFound.Code,
+	http.StatusConflict:            "CONFLICT",
+	http.StatusRequestTimeout:      ErrTimeout.Code,
+	http.StatusTooManyRequests:     ErrRateLimited.Code,
+	http.StatusServiceUnavailable:  ErrUnavailable.Code,
+	http.StatusInternalServerError: ErrInternal.Code,
+}
+
 // handleAPIError converts go-swagger API errors into SDK errors.
-func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error {
+// It wraps sentinel errors so that errors.Is works consistently.
+// The original server error message is preserved in the Cause chain.
+func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) error {
 	status := apiErr.Code
 
-	switch status {
-	case http.StatusBadRequest:
-		return newError("BAD_REQUEST", message, status, apiErr)
-	case http.StatusUnauthorized:
-		return newError("UNAUTHORIZED", "authentication required", status, apiErr)
-	case http.StatusForbidden:
-		return newError("FORBIDDEN", "access denied", status, apiErr)
-	case http.StatusNotFound:
-		return newError("NOT_FOUND", "resource not found", status, apiErr)
-	case http.StatusRequestTimeout:
-		return newError("TIMEOUT", "request timed out", status, apiErr)
-	case http.StatusTooManyRequests:
-		return newError("RATE_LIMITED", "too many requests", status, apiErr)
-	default:
-		if status >= http.StatusInternalServerError {
-			return newError("INTERNAL", "server error", status, apiErr)
-		}
-		return newError("REQUEST_FAILED", message, status, apiErr)
+	// Extract the most useful error message:
+	// 1. Try the API error's message if non-empty
+	// 2. Fall back to the provided fallback message
+	serverMsg := fallbackMsg
+	if msg := apiErr.Error(); msg != "" {
+		serverMsg = msg
 	}
+
+	// Look up error code in table
+	if code, ok := httpStatusToErrorCode[status]; ok {
+		return wrapError(apiErr, code, serverMsg, status)
+	}
+
+	// Handle other 5xx errors
+	if status >= http.StatusInternalServerError {
+		return wrapError(apiErr, ErrInternal.Code, serverMsg, status)
+	}
+
+	return newError("REQUEST_FAILED", serverMsg, status, apiErr)
 }
 
 // ----------------------------------------------------------------------------
@@ -1013,8 +1233,18 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error 
 // ----------------------------------------------------------------------------
 
 // bearerAuth returns a runtime.ClientAuthInfoWriter for Bearer token auth.
+//
+// The token is read at the time the request is authenticated, not when
+// this method is called. This ensures the most current token is used,
+// which is important if SetToken is called between method calls.
 func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
-	return httptransport.BearerToken(c.getToken())
+	return runtime.ClientAuthInfoWriterFunc(func(r runtime.ClientRequest, _ strfmt.Registry) error {
+		token := c.getToken() // Read at write time
+		if token != "" {
+			return r.SetHeaderParam("Authorization", "Bearer "+token)
+		}
+		return nil
+	})
 }
 
 // getToken returns the current token (thread-safe).
@@ -1030,6 +1260,21 @@ func (c *Client) getToken() string {
 // such as [Client.ValidateToken] and [Client.Logout].
 // SetToken is safe for concurrent use.
 //
+// # Token Validation
+//
+// Tokens are validated to prevent HTTP header injection attacks. If a token
+// contains control characters (CR, LF, or other characters < 0x20), the token
+// is rejected and a warning is logged. The previous token remains unchanged.
+// This is a security measure - valid JWT tokens never contain these characters.
+//
+// To check if a token was accepted, call [Client.getToken] after setting,
+// or use [Client.ValidateToken] to verify with the server.
+//
+// # Empty Token
+//
+// Passing an empty string clears the token. Use [Client.ClearToken] for a
+// more explicit way to remove the token.
+//
 // Example:
 //
 //	tokens, _ := client.GetToken(ctx, "my-client-id")
@@ -1038,6 +1283,12 @@ func (c *Client) getToken() string {
 //	// Now authenticated endpoints will work
 //	validation, _ := client.ValidateToken(ctx)
 func (c *Client) SetToken(token string) {
+	// Validate token to prevent HTTP header injection via CR/LF characters.
+	// Empty string is valid (clears token), but non-empty tokens must be safe.
+	if token != "" && !isValidToken(token) {
+		getLogger().Printf("stromboli: WARNING: SetToken called with invalid token (contains control characters), ignoring")
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = token
@@ -1081,12 +1332,13 @@ func (c *Client) GetToken(ctx context.Context, clientID string) (*TokenResponse,
 	// Create request parameters
 	params := auth.NewPostAuthTokenParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(&models.TokenRequest{
 		ClientID: &clientID,
 	})
 
-	// Execute request (uses bearer auth if token is set, for security)
+	// Execute request - GetToken uses bearerAuth which only sets header if token exists.
+	// This allows the endpoint to work both with and without prior authentication.
 	resp, err := c.api.Auth.PostAuthToken(params, c.bearerAuth())
 	if err != nil {
 		return nil, c.handleError(err, "failed to get token")
@@ -1129,7 +1381,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenR
 	// Create request parameters
 	params := auth.NewPostAuthRefreshParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(&models.RefreshRequest{
 		RefreshToken: &refreshToken,
 	})
@@ -1179,7 +1431,7 @@ func (c *Client) ValidateToken(ctx context.Context) (*TokenValidation, error) {
 	// Create request parameters
 	params := auth.NewGetAuthValidateParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request with bearer auth
 	resp, err := c.api.Auth.GetAuthValidate(params, c.bearerAuth())
@@ -1226,7 +1478,7 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 	// Create request parameters
 	params := auth.NewPostAuthLogoutParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request with bearer auth
 	resp, err := c.api.Auth.PostAuthLogout(params, c.bearerAuth())
@@ -1262,8 +1514,8 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 //	    log.Fatal(err)
 //	}
 //
-//	for _, name := range secrets {
-//	    fmt.Printf("Available secret: %s\n", name)
+//	for _, s := range secrets {
+//	    fmt.Printf("Secret: %s (created: %s)\n", s.Name, s.CreatedAt)
 //	}
 //
 // Using secrets in execution:
@@ -1274,15 +1526,15 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 //	    Prompt: "Use my GitHub token to list repos",
 //	    Podman: &stromboli.PodmanOptions{
 //	        SecretsEnv: map[string]string{
-//	            "GITHUB_TOKEN": secrets[0], // Use first available secret
+//	            "GITHUB_TOKEN": secrets[0].Name, // Use first available secret
 //	        },
 //	    },
 //	})
-func (c *Client) ListSecrets(ctx context.Context) ([]string, error) {
+func (c *Client) ListSecrets(ctx context.Context) ([]*Secret, error) {
 	// Create request parameters
 	params := secrets.NewGetSecretsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Secrets.GetSecrets(params)
@@ -1301,5 +1553,543 @@ func (c *Client) ListSecrets(ctx context.Context) ([]string, error) {
 		return nil, newError("SECRETS_ERROR", payload.Error, 500, nil)
 	}
 
-	return payload.Secrets, nil
+	// Map secrets
+	result := make([]*Secret, 0, len(payload.Secrets))
+	for _, s := range payload.Secrets {
+		if s != nil {
+			result = append(result, &Secret{
+				ID:        s.ID,
+				Name:      s.Name,
+				CreatedAt: s.CreatedAt,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+// CreateSecret creates a new Podman secret.
+//
+// Secrets can be used to securely pass sensitive data (API keys, tokens, etc.)
+// to containers without exposing them in environment variables or command lines.
+//
+// Example:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Returns [ErrSecretExists] if a secret with this name already exists:
+//
+//	err := client.CreateSecret(ctx, req)
+//	if errors.Is(err, stromboli.ErrSecretExists) {
+//	    fmt.Println("Secret already exists")
+//	}
+func (c *Client) CreateSecret(ctx context.Context, req *CreateSecretRequest) error {
+	if req == nil {
+		return newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Name == "" {
+		return newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+	if req.Value == "" {
+		return newError("BAD_REQUEST", "secret value is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewPostSecretsParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+	params.SetRequest(&models.CreateSecretRequest{
+		Name:  &req.Name,
+		Value: &req.Value,
+	})
+
+	// Execute request
+	resp, err := c.api.Secrets.PostSecrets(params)
+	if err != nil {
+		// Check for conflict (secret already exists)
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
+			return ErrSecretExists
+		}
+		return c.handleError(err, "failed to create secret")
+	}
+
+	// Check response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return newError("INVALID_RESPONSE", "empty secret response", 0, nil)
+	}
+
+	// Check for error in response
+	if payload.Error != "" {
+		return newError("SECRET_CREATE_ERROR", payload.Error, 500, nil)
+	}
+
+	if !payload.Success {
+		return newError("SECRET_CREATE_FAILED", "failed to create secret", 500, nil)
+	}
+
+	return nil
+}
+
+// GetSecret retrieves metadata for a specific secret.
+//
+// For security, the actual secret value is never returned - only the ID,
+// name, and creation time.
+//
+// Example:
+//
+//	secret, err := client.GetSecret(ctx, "github-token")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Printf("Secret %s created at %s\n", secret.Name, secret.CreatedAt)
+//
+// Returns [ErrNotFound] if the secret doesn't exist:
+//
+//	secret, err := client.GetSecret(ctx, "unknown-secret")
+//	if errors.Is(err, stromboli.ErrNotFound) {
+//	    fmt.Println("Secret not found")
+//	}
+func (c *Client) GetSecret(ctx context.Context, name string) (*Secret, error) {
+	if name == "" {
+		return nil, newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewGetSecretsNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+	params.SetName(name)
+
+	// Execute request
+	resp, err := c.api.Secrets.GetSecretsName(params)
+	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
+		return nil, c.handleError(err, "failed to get secret")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty secret response", 0, nil)
+	}
+
+	return &Secret{
+		ID:        payload.ID,
+		Name:      payload.Name,
+		CreatedAt: payload.CreatedAt,
+	}, nil
+}
+
+// DeleteSecret permanently deletes a Podman secret.
+//
+// WARNING: This action cannot be undone. Secrets currently in use by
+// running containers may cause those containers to fail.
+//
+// Example:
+//
+//	err := client.DeleteSecret(ctx, "github-token")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Println("Secret deleted")
+//
+// Returns [ErrNotFound] if the secret doesn't exist:
+//
+//	err := client.DeleteSecret(ctx, "unknown-secret")
+//	if errors.Is(err, stromboli.ErrNotFound) {
+//	    fmt.Println("Secret not found")
+//	}
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	if name == "" {
+		return newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewDeleteSecretsNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+	params.SetName(name)
+
+	// Execute request
+	_, err := c.api.Secrets.DeleteSecretsName(params)
+	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return ErrNotFound
+		}
+		return c.handleError(err, "failed to delete secret")
+	}
+
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Images Methods
+// ----------------------------------------------------------------------------
+
+// ListImages returns all local container images sorted by compatibility rank.
+//
+// Images are ranked by their compatibility with Stromboli:
+//   - Rank 1-2: Verified compatible (have required tools)
+//   - Rank 3: Standard glibc (compatible)
+//   - Rank 4: Incompatible (Alpine/musl)
+//
+// Example:
+//
+//	images, err := client.ListImages(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, img := range images {
+//	    fmt.Printf("%s:%s (rank %d, compatible: %v)\n",
+//	        img.Repository, img.Tag, img.CompatibilityRank, img.Compatible)
+//	}
+func (c *Client) ListImages(ctx context.Context) ([]*Image, error) {
+	// Create request parameters
+	params := images.NewGetImagesParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+
+	// Execute request
+	resp, err := c.api.Images.GetImages(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to list images")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty images response", 0, nil)
+	}
+
+	// Map images
+	result := make([]*Image, 0, len(payload.Images))
+	for _, img := range payload.Images {
+		if img != nil {
+			result = append(result, fromGeneratedImage(img))
+		}
+	}
+
+	return result, nil
+}
+
+// GetImage returns detailed information about a specific container image.
+//
+// This includes all labels, compatibility information, and available tools.
+//
+// Example:
+//
+//	image, err := client.GetImage(ctx, "python:3.12-slim")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Image: %s\n", image.ID)
+//	fmt.Printf("Compatible: %v\n", image.Compatible)
+//	fmt.Printf("Tools: %v\n", image.Tools)
+//
+// Returns [ErrImageNotFound] if the image doesn't exist locally:
+//
+//	image, err := client.GetImage(ctx, "nonexistent:latest")
+//	if errors.Is(err, stromboli.ErrImageNotFound) {
+//	    fmt.Println("Image not found")
+//	}
+func (c *Client) GetImage(ctx context.Context, name string) (*Image, error) {
+	if name == "" {
+		return nil, newError("BAD_REQUEST", "image name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewGetImagesNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+	params.SetName(name)
+
+	// Execute request
+	resp, err := c.api.Images.GetImagesName(params)
+	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil, ErrImageNotFound
+		}
+		return nil, c.handleError(err, "failed to get image")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty image response", 0, nil)
+	}
+
+	return fromGeneratedImageDetail(payload), nil
+}
+
+// SearchImages searches container registries for images matching the query.
+//
+// Returns results from Docker Hub and other configured registries.
+//
+// Example:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query: "python",
+//	    Limit: 10,
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, r := range results {
+//	    fmt.Printf("%s: %s (stars: %d, official: %v)\n",
+//	        r.Name, r.Description, r.Stars, r.Official)
+//	}
+func (c *Client) SearchImages(ctx context.Context, opts *SearchImagesOptions) ([]*ImageSearchResult, error) {
+	if opts == nil || opts.Query == "" {
+		return nil, newError("BAD_REQUEST", "search query is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewGetImagesSearchParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+	params.SetQ(opts.Query)
+
+	if opts.Limit > 0 {
+		params.SetLimit(&opts.Limit)
+	}
+	if opts.NoTrunc {
+		params.SetNoTrunc(&opts.NoTrunc)
+	}
+
+	// Execute request
+	resp, err := c.api.Images.GetImagesSearch(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to search images")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty search response", 0, nil)
+	}
+
+	// Map results
+	results := make([]*ImageSearchResult, 0, len(payload.Results))
+	for _, r := range payload.Results {
+		if r != nil {
+			results = append(results, &ImageSearchResult{
+				Name:        r.Name,
+				Description: r.Description,
+				Stars:       r.Stars,
+				Official:    r.Official,
+				Automated:   r.Automated,
+				Index:       r.Index,
+			})
+		}
+	}
+
+	return results, nil
+}
+
+// PullImage pulls a container image from a registry.
+//
+// This operation may take some time for large images.
+//
+// Example:
+//
+//	result, err := client.PullImage(ctx, &stromboli.PullImageRequest{
+//	    Image:    "python:3.12-slim",
+//	    Platform: "linux/amd64",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if result.Success {
+//	    fmt.Printf("Pulled image %s (ID: %s)\n", result.Image, result.ImageID)
+//	}
+func (c *Client) PullImage(ctx context.Context, req *PullImageRequest) (*PullImageResponse, error) {
+	if req == nil {
+		return nil, newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Image == "" {
+		return nil, newError("BAD_REQUEST", "image name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewPostImagesPullParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.effectiveTimeout(ctx))
+
+	image := req.Image
+	params.SetRequest(&models.ImagePullRequest{
+		Image:    &image,
+		Platform: req.Platform,
+		Quiet:    req.Quiet,
+	})
+
+	// Execute request
+	resp, err := c.api.Images.PostImagesPull(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to pull image")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty pull response", 0, nil)
+	}
+
+	return &PullImageResponse{
+		Success: payload.Success,
+		Image:   payload.Image,
+		ImageID: payload.ImageID,
+	}, nil
+}
+
+// fromGeneratedImage converts a generated ImageInfoResponse to our Image type.
+func fromGeneratedImage(img *models.ImageInfoResponse) *Image {
+	return &Image{
+		ID:                img.ID,
+		Repository:        img.Repository,
+		Tag:               img.Tag,
+		Size:              img.Size,
+		Created:           img.Created,
+		Description:       img.Description,
+		Compatible:        img.Compatible,
+		CompatibilityRank: img.CompatibilityRank,
+		HasClaudeCLI:      img.HasClaudeCli,
+		Tools:             img.Tools,
+	}
+}
+
+// fromGeneratedImageDetail converts a generated ImageDetailResponse to our Image type.
+func fromGeneratedImageDetail(img *models.ImageDetailResponse) *Image {
+	return &Image{
+		ID:                img.ID,
+		Repository:        img.Repository,
+		Tag:               img.Tag,
+		Size:              img.Size,
+		Created:           img.Created,
+		Description:       img.Description,
+		Compatible:        img.Compatible,
+		CompatibilityRank: img.CompatibilityRank,
+		HasClaudeCLI:      img.HasClaudeCli,
+		Tools:             img.Tools,
+	}
+}
+
+// validateRequestSize checks that request fields don't exceed size limits.
+// This prevents memory exhaustion from excessively large requests.
+func validateRequestSize(req *RunRequest) error {
+	if len(req.Prompt) > maxPromptSize {
+		return newError("BAD_REQUEST",
+			fmt.Sprintf("prompt exceeds maximum size of %d bytes (got %d)", maxPromptSize, len(req.Prompt)),
+			400, nil)
+	}
+	if req.Claude != nil {
+		if len(req.Claude.SystemPrompt) > maxSystemPromptSize {
+			return newError("BAD_REQUEST",
+				fmt.Sprintf("system prompt exceeds maximum size of %d bytes (got %d)", maxSystemPromptSize, len(req.Claude.SystemPrompt)),
+				400, nil)
+		}
+		if len(req.Claude.JSONSchema) > maxJSONSchemaSize {
+			return newError("BAD_REQUEST",
+				fmt.Sprintf("JSON schema exceeds maximum size of %d bytes (got %d)", maxJSONSchemaSize, len(req.Claude.JSONSchema)),
+				400, nil)
+		}
+	}
+	return nil
+}
+
+// validateJSONSchema performs MINIMAL validation of a JSON schema string.
+//
+// WARNING: This does NOT validate JSON Schema compliance. It only checks:
+//   - The string is valid JSON
+//   - At least one structural schema keyword exists (type, properties, items, etc.)
+//
+// Metadata-only schemas (e.g., {"title": "My Schema"}) are rejected because they
+// don't provide structural validation. If you need metadata-only schemas, add a
+// "type" field or use a proper JSON Schema validator.
+//
+// Invalid schemas WILL pass this check and fail server-side.
+// For production use, pre-validate schemas with a JSON Schema library such as:
+//   - github.com/santhosh-tekuri/jsonschema
+//   - github.com/xeipuuv/gojsonschema
+func validateJSONSchema(schema string) error {
+	// Parse the schema (single parse instead of json.Valid + Unmarshal)
+	var s map[string]interface{}
+	if err := json.Unmarshal([]byte(schema), &s); err != nil {
+		return fmt.Errorf("not valid JSON: %w", err)
+	}
+
+	// Validate "type" keyword if present - must be string or array of strings
+	if typeVal, hasType := s["type"]; hasType {
+		switch v := typeVal.(type) {
+		case string:
+			// Valid: "type": "object"
+		case []interface{}:
+			// Valid: "type": ["string", "null"] - verify all elements are strings
+			for i, elem := range v {
+				if _, isString := elem.(string); !isString {
+					return fmt.Errorf("'type' array element %d must be a string", i)
+				}
+			}
+		default:
+			return fmt.Errorf("'type' must be a string or array of strings")
+		}
+	}
+
+	// Require at least one STRUCTURAL keyword that actually constrains output.
+	// Metadata keywords (title, description, $comment) alone don't provide
+	// meaningful validation, so we don't accept schemas with only those.
+	structuralKeywords := []string{
+		// Type constraints
+		"type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const",
+		// Object structure
+		"properties", "required", "additionalProperties", "patternProperties",
+		// Array structure
+		"items", "additionalItems", "contains",
+		// Schema composition
+		"definitions", "$defs", "not", "if", "then", "else",
+		// Value validation
+		"minimum", "maximum", "minLength", "maxLength", "pattern",
+		"minItems", "maxItems", "uniqueItems",
+		"minProperties", "maxProperties",
+		"multipleOf", "exclusiveMinimum", "exclusiveMaximum",
+		"format",
+	}
+	for _, keyword := range structuralKeywords {
+		if _, ok := s[keyword]; ok {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("schema must contain at least one structural JSON Schema keyword (type, properties, items, $ref, etc.)")
+}
+
+// isValidTokenChar returns true if the token contains only valid HTTP header characters.
+// This prevents HTTP header injection attacks via malicious tokens containing CR/LF.
+func isValidToken(token string) bool {
+	for _, c := range token {
+		// Reject CR, LF, and other control characters that could enable header injection
+		if c == '\r' || c == '\n' || c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }

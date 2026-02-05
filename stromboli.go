@@ -52,6 +52,32 @@
 //	    log.Fatal(err)
 //	}
 //
+// # Streaming
+//
+// For real-time output, use the Stream method:
+//
+//	stream, err := client.Stream(ctx, &stromboli.StreamRequest{
+//	    Prompt: "Write a story",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer stream.Close()
+//
+//	for stream.Next() {
+//	    fmt.Print(stream.Event().Data)
+//	}
+//
+// # Authentication
+//
+// For authenticated endpoints, obtain and set a token:
+//
+//	tokens, _ := client.GetToken(ctx, "client-id")
+//	client.SetToken(tokens.AccessToken)
+//
+//	// Now authenticated methods work
+//	validation, _ := client.ValidateToken(ctx)
+//
 // # Error Handling
 //
 // The SDK provides typed errors for common failure cases:
@@ -73,8 +99,8 @@
 //
 // The SDK is built in two layers:
 //
-//   - Wrapper Layer: Clean, idiomatic Go API with context support,
-//     retries, and error handling (this package)
+//   - Wrapper Layer: Clean, idiomatic Go API with context support
+//     and typed error handling (this package)
 //   - Generated Layer: Auto-generated HTTP client from OpenAPI spec
 //     (github.com/tomblancdev/stromboli-go/generated)
 //
@@ -88,7 +114,7 @@
 //
 // # API Version Compatibility
 //
-// This SDK version targets Stromboli API v0.3.0-alpha. Compatibility
+// This SDK version targets Stromboli API v0.4.0-alpha. Compatibility
 // with other API versions is not guaranteed. Use [Client.Health] to
 // check the server version at runtime.
 package stromboli

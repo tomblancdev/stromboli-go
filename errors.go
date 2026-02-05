@@ -2,6 +2,7 @@ package stromboli
 
 import (
 	"fmt"
+	"time"
 )
 
 // Error represents an error returned by the Stromboli API.
@@ -39,6 +40,10 @@ type Error struct {
 	// Cause is the underlying error, if any.
 	// Use errors.Unwrap or errors.Is to inspect the cause chain.
 	Cause error
+
+	// RetryAfter indicates how long to wait before retrying (for 429 responses).
+	// Zero if no Retry-After header was provided or not applicable.
+	RetryAfter time.Duration
 }
 
 // Error returns a string representation of the error.
@@ -62,11 +67,15 @@ func (e *Error) Unwrap() error {
 
 // Is reports whether the target error matches this error.
 //
-// Two errors match if they have the same Code. This allows
-// using [errors.Is] with sentinel errors:
+// Two errors match if they have the same Code. The Status field is
+// NOT compared, so errors.Is(err, ErrNotFound) matches any NOT_FOUND
+// error regardless of the HTTP status code. This allows sentinel errors
+// to match all instances of that error type.
+//
+// Example:
 //
 //	if errors.Is(err, stromboli.ErrNotFound) {
-//	    // Handle not found
+//	    // Handles any NOT_FOUND error (404, or otherwise)
 //	}
 func (e *Error) Is(target error) bool {
 	t, ok := target.(*Error)
@@ -83,8 +92,22 @@ func (e *Error) Is(target error) bool {
 //	if errors.Is(err, stromboli.ErrNotFound) {
 //	    fmt.Println("Resource not found")
 //	}
+//
+// # Error Design
+//
+// Generic errors (ErrNotFound, ErrTimeout, etc.) are used for most resources.
+// Resource-specific errors exist where the failure mode is domain-specific:
+//
+//   - Images: [ErrImageNotFound], [ErrImagePullFailed] - container image operations
+//     have distinct failure modes (local lookup vs registry pull)
+//   - Secrets: [ErrSecretExists], [ErrInvalidSecretName] - secret operations have
+//     specific validation and conflict rules
+//
+// When checking for "not found" errors, use the specific error if available
+// (e.g., ErrImageNotFound for images), or ErrNotFound for other resources.
 var (
 	// ErrNotFound indicates the requested resource does not exist.
+	// Used for jobs, sessions, and other resources without specific not-found errors.
 	// HTTP status: 404.
 	ErrNotFound = &Error{
 		Code:    "NOT_FOUND",
@@ -134,6 +157,67 @@ var (
 		Code:    "UNAVAILABLE",
 		Message: "service temporarily unavailable",
 		Status:  503,
+	}
+
+	// ErrSecretExists indicates a secret with this name already exists.
+	// HTTP status: 409.
+	ErrSecretExists = &Error{
+		Code:    "SECRET_EXISTS",
+		Message: "secret already exists",
+		Status:  409,
+	}
+
+	// ErrInvalidSecretName indicates the secret name is invalid.
+	// HTTP status: 400.
+	ErrInvalidSecretName = &Error{
+		Code:    "INVALID_SECRET_NAME",
+		Message: "invalid secret name",
+		Status:  400,
+	}
+
+	// ErrImageNotFound indicates the requested image was not found locally.
+	// This is distinct from [ErrNotFound] to differentiate between local image
+	// lookup failures and other resource not-found errors.
+	// Use [Client.PullImage] to fetch the image from a registry.
+	// HTTP status: 404.
+	ErrImageNotFound = &Error{
+		Code:    "IMAGE_NOT_FOUND",
+		Message: "image not found",
+		Status:  404,
+	}
+
+	// ErrImagePullFailed indicates the image pull operation failed.
+	// HTTP status: 500.
+	ErrImagePullFailed = &Error{
+		Code:    "IMAGE_PULL_FAILED",
+		Message: "failed to pull image",
+		Status:  500,
+	}
+
+	// ErrRateLimited indicates too many requests were made.
+	// HTTP status: 429.
+	//
+	// NOTE: The RetryAfter field is not automatically populated because
+	// the go-swagger client doesn't expose response headers in error responses.
+	// To capture the Retry-After header, use [WithResponseHook] to inspect
+	// the response before the error is returned:
+	//
+	//	var retryAfter time.Duration
+	//	client, _ := stromboli.NewClient(url,
+	//	    stromboli.WithResponseHook(func(resp *http.Response) {
+	//	        if resp.StatusCode == 429 {
+	//	            if s := resp.Header.Get("Retry-After"); s != "" {
+	//	                if seconds, err := strconv.Atoi(s); err == nil {
+	//	                    retryAfter = time.Duration(seconds) * time.Second
+	//	                }
+	//	            }
+	//	        }
+	//	    }),
+	//	)
+	ErrRateLimited = &Error{
+		Code:    "RATE_LIMITED",
+		Message: "too many requests",
+		Status:  429,
 	}
 )
 

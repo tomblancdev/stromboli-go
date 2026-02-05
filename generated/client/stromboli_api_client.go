@@ -12,6 +12,7 @@ import (
 
 	"github.com/tomblancdev/stromboli-go/generated/client/auth"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
+	"github.com/tomblancdev/stromboli-go/generated/client/images"
 	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
 	"github.com/tomblancdev/stromboli-go/generated/client/secrets"
 	"github.com/tomblancdev/stromboli-go/generated/client/sessions"
@@ -62,6 +63,7 @@ func New(transport runtime.ClientTransport, formats strfmt.Registry) *StromboliA
 	cli.Transport = transport
 	cli.Auth = auth.New(transport, formats)
 	cli.Execution = execution.New(transport, formats)
+	cli.Images = images.New(transport, formats)
 	cli.Jobs = jobs.New(transport, formats)
 	cli.Secrets = secrets.New(transport, formats)
 	cli.Sessions = sessions.New(transport, formats)
@@ -114,6 +116,8 @@ type StromboliAPI struct {
 
 	Execution execution.ClientService
 
+	Images images.ClientService
+
 	Jobs jobs.ClientService
 
 	Secrets secrets.ClientService
@@ -130,6 +134,7 @@ func (c *StromboliAPI) SetTransport(transport runtime.ClientTransport) {
 	c.Transport = transport
 	c.Auth.SetTransport(transport)
 	c.Execution.SetTransport(transport)
+	c.Images.SetTransport(transport)
 	c.Jobs.SetTransport(transport)
 	c.Secrets.SetTransport(transport)
 	c.Sessions.SetTransport(transport)
