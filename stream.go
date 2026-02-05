@@ -193,9 +193,20 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 		defer func() {
 			close(done) // Signal watcher to exit
 			if r := recover(); r != nil {
-				s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
+				// Only set error if not already set (preserve original error)
+				if s.err == nil {
+					s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
+				}
 			}
-			cleanup() // Ensure stream is closed on any exit
+			// Cleanup with defensive panic recovery to prevent double-panic
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						getLogger().Printf("stromboli: WARNING: cleanup panic ignored: %v", r)
+					}
+				}()
+				cleanup()
+			}()
 			close(ch)
 		}()
 
@@ -246,6 +257,16 @@ func (s *Stream) Events() <-chan *StreamEvent {
 }
 
 // readEvent reads the next SSE event from the stream.
+//
+// NOTE: This method blocks on network I/O until a complete event is received.
+// Go's context cancellation does not interrupt blocking reads. To implement
+// timeouts, use one of these approaches:
+//   - [WithStreamTimeout]: Applies timeout if no context deadline is set
+//   - [context.WithTimeout]: Pass a context with deadline to [Client.Stream]
+//   - Call [Stream.Close] from another goroutine to unblock the reader
+//
+// The [Stream.EventsWithContext] method handles this automatically by watching
+// for context cancellation and closing the stream.
 func (s *Stream) readEvent() (*StreamEvent, error) {
 	event := &StreamEvent{}
 	var dataBuilder strings.Builder
@@ -444,7 +465,10 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	httpReq.Header.Set("Connection", "keep-alive")
 	httpReq.Header.Set("User-Agent", c.userAgent)
 
-	// Add auth if token is set (thread-safe access)
+	// Add auth if token is set (thread-safe access).
+	// Note: Token is captured at this point. If SetToken is called concurrently,
+	// this request may use the previous token. Call SetToken before Stream if
+	// you need to ensure the latest token is used.
 	if token := c.getToken(); token != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}

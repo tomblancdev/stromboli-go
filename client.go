@@ -53,16 +53,24 @@ var (
 	defaultTransportCopy *http.Transport
 )
 
-// getDefaultTransport returns a cached clone of http.DefaultTransport.
+// getDefaultTransport returns a cached transport for client isolation.
 // This is safe to call from multiple goroutines.
 func getDefaultTransport() *http.Transport {
 	defaultTransportOnce.Do(func() {
 		if t, ok := http.DefaultTransport.(*http.Transport); ok {
 			defaultTransportCopy = t.Clone()
 		} else {
-			// This is rare but can happen if http.DefaultTransport was replaced
-			// with a custom implementation. Log a warning for debugging.
-			getLogger().Printf("stromboli: WARNING: http.DefaultTransport is not *http.Transport, using default settings")
+			// http.DefaultTransport was replaced with a custom implementation.
+			// Create a fresh transport to ensure client isolation rather than
+			// sharing the custom transport across all clients.
+			getLogger().Printf("stromboli: WARNING: http.DefaultTransport is not *http.Transport, creating isolated transport")
+			defaultTransportCopy = &http.Transport{
+				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   10,
+				IdleConnTimeout:       90 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				ExpectContinueTimeout: 1 * time.Second,
+			}
 		}
 	})
 	return defaultTransportCopy
@@ -481,6 +489,11 @@ func (c *Client) Run(ctx context.Context, req *RunRequest) (*RunResponse, error)
 		}
 	}
 
+	// Validate Resume requires SessionID
+	if req.Claude != nil && req.Claude.Resume && req.Claude.SessionID == "" {
+		return nil, newError("BAD_REQUEST", "session_id is required when resume is true", 400, nil)
+	}
+
 	// Convert to generated model
 	genReq := toGeneratedRunRequest(req)
 
@@ -572,6 +585,11 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
 			return nil, newError("BAD_REQUEST", fmt.Sprintf("invalid JSON schema: %v", err), 400, nil)
 		}
+	}
+
+	// Validate Resume requires SessionID
+	if req.Claude != nil && req.Claude.Resume && req.Claude.SessionID == "" {
+		return nil, newError("BAD_REQUEST", "session_id is required when resume is true", 400, nil)
 	}
 
 	// Convert to generated model

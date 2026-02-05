@@ -134,6 +134,10 @@ func WithStreamTimeout(d time.Duration) Option {
 //
 // This option will be removed in v1.0.
 //
+// Note: The deprecation warning is logged when [NewClient] is called.
+// If you use [SetLogger] to configure a custom logger, call it before
+// creating clients to see this warning in your logger.
+//
 // Default: 0 (no retries).
 func WithRetries(n int) Option {
 	return func(_ *Client) {
@@ -230,7 +234,13 @@ func WithToken(token string) Option {
 type RequestHook func(req *http.Request)
 
 // ResponseHook is called after each HTTP response is received.
-// Use this for logging, metrics, or inspecting responses.
+//
+// WARNING: For most API methods (Run, Health, etc.), the response body will
+// be consumed by the generated client before your hook runs. The hook is
+// primarily useful for inspecting headers and status codes, not body content.
+// For the Stream method, the body is available as it hasn't been consumed yet.
+//
+// Use this for logging, metrics, or inspecting response metadata.
 type ResponseHook func(resp *http.Response)
 
 // WithRequestHook sets a hook that is called before each HTTP request.
@@ -253,8 +263,8 @@ func WithRequestHook(hook RequestHook) Option {
 
 // WithResponseHook sets a hook that is called after each HTTP response.
 //
-// Use this for observability (logging, metrics) or to inspect responses.
-// Note: The response body may have already been read by the client.
+// Use this for observability (logging, metrics) or to inspect response headers
+// and status codes. See [ResponseHook] for important caveats about body availability.
 // Pass nil to clear a previously set hook.
 //
 // Example:
