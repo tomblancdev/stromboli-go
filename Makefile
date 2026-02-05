@@ -1,4 +1,4 @@
-.PHONY: help build test test-race test-coverage test-e2e lint fmt vet generate dev shell clean mocks mock-server
+.PHONY: help build test test-race test-coverage test-e2e lint fmt vet generate dev shell clean mocks mock-server licenses
 
 # Container settings
 IMAGE_NAME := stromboli-go-dev
@@ -36,6 +36,7 @@ help:
 	@echo "Maintenance:"
 	@echo "  make clean          Clean build artifacts"
 	@echo "  make deps           Download dependencies"
+	@echo "  make licenses       Report dependency licenses"
 
 # Build dev container image
 build-image:
@@ -109,3 +110,7 @@ clean:
 deps: build-image
 	$(call run_in_container,go mod download)
 	$(call run_in_container,go mod tidy)
+
+# License audit
+licenses: build-image
+	$(call run_in_container,go-licenses report ./... 2>/dev/null)

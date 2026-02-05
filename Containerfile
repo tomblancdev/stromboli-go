@@ -8,7 +8,8 @@ RUN apk add --no-cache nodejs npm
 # Install Go tools
 RUN go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest && \
     go install github.com/go-swagger/go-swagger/cmd/swagger@v0.31.0 && \
-    go install github.com/vektra/mockery/v2@latest
+    go install github.com/vektra/mockery/v2@latest && \
+    go install github.com/google/go-licenses@latest
 
 # Install prism (OpenAPI mock server)
 RUN npm install -g @stoplight/prism-cli
