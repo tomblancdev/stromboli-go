@@ -1,6 +1,7 @@
 package stromboli
 
 import (
+	"log"
 	"net/http"
 	"time"
 )
@@ -12,7 +13,7 @@ import (
 //
 //	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
-//	    stromboli.WithRetries(3),
+//	    stromboli.WithHTTPClient(customHTTPClient),
 //	)
 //
 // Options are applied in order, so later options override earlier ones.
@@ -48,25 +49,16 @@ func WithTimeout(d time.Duration) Option {
 
 // WithRetries sets the maximum number of retry attempts for failed requests.
 //
-// NOTE: Retry logic is planned but not yet implemented in v0.x.
-// This option is reserved for future use. Implement retry logic in your
-// application or use a library like hashicorp/go-retryablehttp.
-//
-// Negative values are treated as zero.
+// Deprecated: Retry logic is not implemented. This option logs a warning
+// and does nothing. Implement retry logic in your application or use a
+// library like hashicorp/go-retryablehttp. This will be removed in v1.0.
 //
 // Default: 0 (no retries).
-//
-// Example:
-//
-//	client, err := stromboli.NewClient(url,
-//	    stromboli.WithRetries(3), // Retry up to 3 times
-//	)
 func WithRetries(n int) Option {
-	return func(c *Client) {
-		if n < 0 {
-			n = 0
+	return func(_ *Client) {
+		if n > 0 {
+			log.Printf("stromboli: WARNING: WithRetries(%d) is deprecated and has no effect", n)
 		}
-		c.maxRetries = n
 	}
 }
 
@@ -118,7 +110,10 @@ func WithHTTPClient(httpClient *http.Client) Option {
 //	)
 func WithUserAgent(userAgent string) Option {
 	return func(c *Client) {
-		c.userAgent = userAgent
+		if userAgent != "" {
+			c.userAgent = userAgent
+		}
+		// If empty, keep the default "stromboli-go/{version}"
 	}
 }
 
@@ -141,5 +136,49 @@ func WithUserAgent(userAgent string) Option {
 func WithToken(token string) Option {
 	return func(c *Client) {
 		c.token = token
+	}
+}
+
+// RequestHook is called before each HTTP request is sent.
+// Use this for logging, metrics, or modifying requests.
+type RequestHook func(req *http.Request)
+
+// ResponseHook is called after each HTTP response is received.
+// Use this for logging, metrics, or inspecting responses.
+type ResponseHook func(resp *http.Response)
+
+// WithRequestHook sets a hook that is called before each HTTP request.
+//
+// Use this for observability (logging, metrics) or to modify requests
+// before they are sent.
+//
+// Example:
+//
+//	client, err := stromboli.NewClient(url,
+//	    stromboli.WithRequestHook(func(req *http.Request) {
+//	        log.Printf("Request: %s %s", req.Method, req.URL)
+//	    }),
+//	)
+func WithRequestHook(hook RequestHook) Option {
+	return func(c *Client) {
+		c.requestHook = hook
+	}
+}
+
+// WithResponseHook sets a hook that is called after each HTTP response.
+//
+// Use this for observability (logging, metrics) or to inspect responses.
+// Note: The response body may have already been read by the client.
+//
+// Example:
+//
+//	client, err := stromboli.NewClient(url,
+//	    stromboli.WithResponseHook(func(resp *http.Response) {
+//	        log.Printf("Response: %d %s", resp.StatusCode, resp.Status)
+//	    }),
+//	)
+func WithResponseHook(hook ResponseHook) Option {
+	return func(c *Client) {
+		c.responseHook = hook
 	}
 }

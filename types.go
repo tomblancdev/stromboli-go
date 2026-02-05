@@ -159,7 +159,7 @@ type ClaudeOptions struct {
 	// Model specifies the Claude model to use.
 	// Use the Model* constants: ModelHaiku, ModelSonnet, ModelOpus.
 	// Default: server-configured default (usually sonnet).
-	Model string `json:"model,omitempty"`
+	Model Model `json:"model,omitempty"`
 
 	// SessionID enables conversation continuation.
 	// Pass a previous response's SessionID to continue the conversation.
@@ -467,7 +467,7 @@ type RunResponse struct {
 
 // IsSuccess returns true if the execution completed successfully.
 func (r *RunResponse) IsSuccess() bool {
-	return r.Status == "completed"
+	return r.Status == RunStatusCompleted
 }
 
 // AsyncRunResponse represents the result of starting an async execution.
@@ -686,10 +686,32 @@ type Message struct {
 	Version string `json:"version,omitempty"`
 
 	// Content contains the message content (text, tool calls, etc.).
-	// The structure varies by message type.
+	// The structure varies by message type:
+	//   - For "user" messages: string or []ContentBlock
+	//   - For "assistant" messages: []ContentBlock with text and tool_use
+	//
+	// Use type assertions or json.Marshal/Unmarshal to work with this field.
+	//
+	// Example:
+	//
+	//	// Check if content is a simple string
+	//	if text, ok := msg.Content.(string); ok {
+	//	    fmt.Println(text)
+	//	}
+	//
+	//	// For complex content, marshal and unmarshal
+	//	data, _ := json.Marshal(msg.Content)
+	//	var blocks []map[string]interface{}
+	//	json.Unmarshal(data, &blocks)
 	Content interface{} `json:"content,omitempty"`
 
 	// ToolResult contains tool use results (for tool_result messages).
+	// The structure is typically:
+	//   - ToolUseID: string - The ID of the tool use this result responds to
+	//   - Content: string or []ContentBlock - The result data
+	//   - IsError: bool - Whether this result represents an error
+	//
+	// Use type assertions or json.Marshal/Unmarshal to work with this field.
 	ToolResult interface{} `json:"tool_result,omitempty"`
 }
 
@@ -891,6 +913,10 @@ type PullImageResponse struct {
 // Constants
 // ----------------------------------------------------------------------------
 
+// Model represents a Claude model identifier.
+// Use the Model* constants for type-safe model selection.
+type Model string
+
 // Model constants for Claude model selection.
 //
 // Use these with [ClaudeOptions.Model]:
@@ -901,16 +927,21 @@ type PullImageResponse struct {
 const (
 	// ModelHaiku is the fastest and most cost-effective model.
 	// Best for simple tasks, quick responses, and high-volume use cases.
-	ModelHaiku = "haiku"
+	ModelHaiku Model = "haiku"
 
 	// ModelSonnet is the balanced model for most use cases.
 	// Good balance of speed, capability, and cost.
-	ModelSonnet = "sonnet"
+	ModelSonnet Model = "sonnet"
 
 	// ModelOpus is the most capable model.
 	// Best for complex reasoning, nuanced tasks, and highest quality output.
-	ModelOpus = "opus"
+	ModelOpus Model = "opus"
 )
+
+// String returns the string representation of the Model.
+func (m Model) String() string {
+	return string(m)
+}
 
 // RunStatus constants for execution results.
 const (

@@ -88,7 +88,7 @@
 //
 // # API Version Compatibility
 //
-// This SDK version targets Stromboli API v0.3.0-alpha. Compatibility
+// This SDK version targets Stromboli API v0.4.0-alpha. Compatibility
 // with other API versions is not guaranteed. Use [Client.Health] to
 // check the server version at runtime.
 package stromboli

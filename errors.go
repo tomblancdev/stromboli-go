@@ -2,6 +2,7 @@ package stromboli
 
 import (
 	"fmt"
+	"time"
 )
 
 // Error represents an error returned by the Stromboli API.
@@ -39,6 +40,10 @@ type Error struct {
 	// Cause is the underlying error, if any.
 	// Use errors.Unwrap or errors.Is to inspect the cause chain.
 	Cause error
+
+	// RetryAfter indicates how long to wait before retrying (for 429 responses).
+	// Zero if no Retry-After header was provided or not applicable.
+	RetryAfter time.Duration
 }
 
 // Error returns a string representation of the error.
@@ -166,6 +171,15 @@ var (
 		Code:    "IMAGE_PULL_FAILED",
 		Message: "failed to pull image",
 		Status:  500,
+	}
+
+	// ErrRateLimited indicates too many requests were made.
+	// Check RetryAfter for how long to wait before retrying.
+	// HTTP status: 429.
+	ErrRateLimited = &Error{
+		Code:    "RATE_LIMITED",
+		Message: "too many requests",
+		Status:  429,
 	}
 )
 

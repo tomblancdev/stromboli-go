@@ -211,7 +211,7 @@ func TestNewClient_Options(t *testing.T) {
 
 	client, err := stromboli.NewClient("http://localhost:8585",
 		stromboli.WithTimeout(60*time.Second),
-		stromboli.WithRetries(3),
+		stromboli.WithRetries(3), //nolint:staticcheck // Testing deprecated option still works
 		stromboli.WithHTTPClient(customHTTPClient),
 		stromboli.WithUserAgent("test-agent/1.0"),
 	)
@@ -2252,6 +2252,66 @@ func TestRun_WithComposeEnvironment(t *testing.T) {
 	assert.True(t, result.IsSuccess())
 }
 
+// TestRun_NewClaudeOptionsFields tests that v0.4.0-alpha ClaudeOptions fields
+// are correctly serialized in requests.
+func TestRun_NewClaudeOptionsFields(t *testing.T) {
+	// Arrange
+	var receivedRequest map[string]interface{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/run" {
+			mustDecode(r, &receivedRequest)
+			// Return success response
+			resp := map[string]interface{}{
+				"id":     "run-v040",
+				"status": "completed",
+				"output": "test output",
+			}
+			w.Header().Set("Content-Type", "application/json")
+			mustEncode(w, resp)
+		}
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+
+	_, err = client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "test prompt",
+		Claude: &stromboli.ClaudeOptions{
+			AddDirs:              []string{"/data", "/config"},
+			Betas:                []string{"beta-feature-1", "beta-feature-2"},
+			DisableSlashCommands: true,
+			Files:                []string{"file1.txt:path1", "file2.txt:path2"},
+			McpConfigs:           []string{"mcp-config.json"},
+			Tools:                []string{"Bash", "Read", "Write"},
+			ForkSession:          true,
+			NoPersistence:        true,
+			PluginDirs:           []string{"/plugins"},
+			InputFormat:          "text",
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+
+	// Verify new v0.4.0-alpha fields were serialized correctly
+	claude, ok := receivedRequest["claude"].(map[string]interface{})
+	require.True(t, ok, "claude options should be present")
+
+	assert.Equal(t, []interface{}{"/data", "/config"}, claude["add_dirs"])
+	assert.Equal(t, []interface{}{"beta-feature-1", "beta-feature-2"}, claude["betas"])
+	assert.Equal(t, true, claude["disable_slash_commands"])
+	assert.Equal(t, []interface{}{"file1.txt:path1", "file2.txt:path2"}, claude["files"])
+	assert.Equal(t, []interface{}{"mcp-config.json"}, claude["mcp_configs"])
+	assert.Equal(t, []interface{}{"Bash", "Read", "Write"}, claude["tools"])
+	assert.Equal(t, true, claude["fork_session"])
+	assert.Equal(t, true, claude["no_persistence"])
+	assert.Equal(t, []interface{}{"/plugins"}, claude["plugin_dirs"])
+	assert.Equal(t, "text", claude["input_format"])
+}
+
 // ============================================================================
 // Streaming Tests
 // ============================================================================
@@ -2431,7 +2491,7 @@ func TestStream_EventsChannel(t *testing.T) {
 
 	// Collect events via channel
 	events := make([]*stromboli.StreamEvent, 0, 3)
-	for event := range stream.Events() {
+	for event := range stream.Events() { //nolint:staticcheck // Testing deprecated method still works
 		events = append(events, event)
 	}
 
@@ -2539,4 +2599,319 @@ func TestStream_ContextCancellation(t *testing.T) {
 
 	// Next should return false (stream closed due to cancellation)
 	assert.False(t, stream.Next())
+}
+
+// TestStream_CloseMultipleTimes tests that Stream.Close is safe to call multiple times.
+func TestStream_CloseMultipleTimes(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "data: test\n\n")
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "test",
+	})
+	require.NoError(t, err)
+
+	// Close multiple times should be safe (no panic, no error)
+	err1 := stream.Close()
+	err2 := stream.Close()
+	err3 := stream.Close()
+
+	// Assert - all calls should succeed
+	assert.NoError(t, err1)
+	assert.NoError(t, err2)
+	assert.NoError(t, err3)
+}
+
+// TestStream_EventsWithContext tests the EventsWithContext method for avoiding goroutine leaks.
+func TestStream_EventsWithContext(t *testing.T) {
+	// Arrange: Server sends multiple events slowly
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+
+		for i := 0; i < 10; i++ {
+			_, _ = fmt.Fprintf(w, "data: Event %d\n\n", i)
+			flusher.Flush()
+			time.Sleep(10 * time.Millisecond)
+		}
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+
+	stream, err := client.Stream(context.Background(), &stromboli.StreamRequest{
+		Prompt: "test",
+	})
+	require.NoError(t, err)
+	defer func() { _ = stream.Close() }()
+
+	// Create a context we can cancel
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel() // Always clean up the context
+	ch := stream.EventsWithContext(ctx)
+
+	// Read just 2 events
+	count := 0
+	for event := range ch {
+		count++
+		assert.Contains(t, event.Data, "Event")
+		if count >= 2 {
+			cancel() // Cancel after 2 events
+			break
+		}
+	}
+
+	// Verify we got the events we expected
+	assert.Equal(t, 2, count)
+}
+
+// ============================================================================
+// Code Review Fix Tests
+// ============================================================================
+
+// TestNewClient_SafeTransportCloning tests that NewClient doesn't panic
+// when DefaultTransport is not a *http.Transport.
+func TestNewClient_SafeTransportCloning(t *testing.T) {
+	// Save original transport
+	original := http.DefaultTransport
+	defer func() { http.DefaultTransport = original }()
+
+	// Set a non-*http.Transport transport
+	http.DefaultTransport = roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		return nil, errors.New("mock transport")
+	})
+
+	// This should NOT panic
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+// roundTripperFunc adapts a function to http.RoundTripper.
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// TestValidateJSONSchema_ValidSchemas tests JSON schema validation with valid schemas.
+func TestValidateJSONSchema_ValidSchemas(t *testing.T) {
+	tests := []struct {
+		name   string
+		schema string
+	}{
+		{"with type", `{"type":"object"}`},
+		{"with $ref", `{"$ref":"#/definitions/Foo"}`},
+		{"with oneOf", `{"oneOf":[{"type":"string"},{"type":"number"}]}`},
+		{"with anyOf", `{"anyOf":[{"type":"string"},{"type":"number"}]}`},
+		{"with allOf", `{"allOf":[{"type":"object"},{"required":["id"]}]}`},
+		{"with enum", `{"enum":["a","b","c"]}`},
+		{"with const", `{"const":"fixed-value"}`},
+		{"complex schema", `{"type":"object","required":["name"],"properties":{"name":{"type":"string"}}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				resp := map[string]interface{}{
+					"id":     "run-123",
+					"status": "completed",
+					"output": "{}",
+				}
+				w.Header().Set("Content-Type", "application/json")
+				mustEncode(w, resp)
+			}))
+			defer server.Close()
+
+			// Act
+			client, err := stromboli.NewClient(server.URL)
+			require.NoError(t, err)
+			_, err = client.Run(context.Background(), &stromboli.RunRequest{
+				Prompt: "test",
+				Claude: &stromboli.ClaudeOptions{
+					JSONSchema: tt.schema,
+				},
+			})
+
+			// Assert - no validation error
+			require.NoError(t, err)
+		})
+	}
+}
+
+// TestValidateJSONSchema_InvalidSchemas tests JSON schema validation with invalid schemas.
+func TestValidateJSONSchema_InvalidSchemas(t *testing.T) {
+	tests := []struct {
+		name        string
+		schema      string
+		errContains string
+	}{
+		{"invalid JSON", `{not json}`, "not valid JSON"},
+		{"missing schema keyword", `{"foo":"bar"}`, "schema must have"},
+		{"empty object", `{}`, "schema must have"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Arrange
+			client, err := stromboli.NewClient("http://localhost:8585")
+			require.NoError(t, err)
+
+			// Act
+			_, err = client.Run(context.Background(), &stromboli.RunRequest{
+				Prompt: "test",
+				Claude: &stromboli.ClaudeOptions{
+					JSONSchema: tt.schema,
+				},
+			})
+
+			// Assert
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+
+			var apiErr *stromboli.Error
+			require.ErrorAs(t, err, &apiErr)
+			assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+		})
+	}
+}
+
+// TestError_RateLimited tests the ErrRateLimited sentinel error.
+func TestError_RateLimited(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		mustEncode(w, map[string]string{"error": "rate limited"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	_, err = client.Health(context.Background())
+
+	// Assert
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, stromboli.ErrRateLimited))
+
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "RATE_LIMITED", apiErr.Code)
+}
+
+// TestWithRequestHook tests that request hooks are called.
+func TestWithRequestHook(t *testing.T) {
+	// Arrange
+	hookCalled := false
+	var capturedMethod string
+	var capturedPath string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"name":       "stromboli",
+			"status":     "ok",
+			"version":    "0.4.0-alpha",
+			"components": []interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL,
+		stromboli.WithRequestHook(func(req *http.Request) {
+			hookCalled = true
+			capturedMethod = req.Method
+			capturedPath = req.URL.Path
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = client.Health(context.Background())
+	require.NoError(t, err)
+
+	// Assert
+	assert.True(t, hookCalled, "request hook should be called")
+	assert.Equal(t, http.MethodGet, capturedMethod)
+	assert.Equal(t, "/health", capturedPath)
+}
+
+// TestWithResponseHook tests that response hooks are called.
+func TestWithResponseHook(t *testing.T) {
+	// Arrange
+	hookCalled := false
+	var capturedStatusCode int
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"name":       "stromboli",
+			"status":     "ok",
+			"version":    "0.4.0-alpha",
+			"components": []interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL,
+		stromboli.WithResponseHook(func(resp *http.Response) {
+			hookCalled = true
+			capturedStatusCode = resp.StatusCode
+		}),
+	)
+	require.NoError(t, err)
+
+	_, err = client.Health(context.Background())
+	require.NoError(t, err)
+
+	// Assert
+	assert.True(t, hookCalled, "response hook should be called")
+	assert.Equal(t, http.StatusOK, capturedStatusCode)
+}
+
+// TestWithRetries_LogsWarning tests that WithRetries logs a deprecation warning.
+// Note: We can't easily test log output, so we just verify it doesn't panic.
+func TestWithRetries_LogsWarning(t *testing.T) {
+	// This should not panic, just log a warning
+	client, err := stromboli.NewClient("http://localhost:8585",
+		stromboli.WithRetries(3), //nolint:staticcheck // Testing deprecated option
+	)
+	require.NoError(t, err)
+	assert.NotNil(t, client)
+}
+
+// TestRunResponse_IsSuccess_UsesConstants tests that IsSuccess uses status constants.
+func TestRunResponse_IsSuccess_UsesConstants(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   string
+		expected bool
+	}{
+		{"completed status", stromboli.RunStatusCompleted, true},
+		{"error status", stromboli.RunStatusError, false},
+		{"random status", "random", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := &stromboli.RunResponse{Status: tt.status}
+			assert.Equal(t, tt.expected, resp.IsSuccess())
+		})
+	}
 }

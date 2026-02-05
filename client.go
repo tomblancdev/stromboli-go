@@ -2,6 +2,7 @@ package stromboli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -28,9 +29,6 @@ import (
 const (
 	// defaultTimeout is the default request timeout.
 	defaultTimeout = 30 * time.Second
-
-	// defaultMaxRetries is the default number of retry attempts.
-	defaultMaxRetries = 0
 )
 
 // Client is the Stromboli API client.
@@ -38,7 +36,6 @@ const (
 // Client provides a clean, idiomatic Go interface to the Stromboli API.
 // It wraps the auto-generated client with additional features:
 //   - Context support for cancellation and timeouts
-//   - Automatic retries with exponential backoff
 //   - Typed errors for common failure cases
 //   - Simplified request/response types
 //
@@ -79,9 +76,6 @@ type Client struct {
 	// timeout is the default request timeout.
 	timeout time.Duration
 
-	// maxRetries is the maximum number of retry attempts.
-	maxRetries int
-
 	// userAgent is the User-Agent header value.
 	userAgent string
 
@@ -93,6 +87,12 @@ type Client struct {
 
 	// api is the generated API client.
 	api *generatedclient.StromboliAPI
+
+	// requestHook is called before each HTTP request (optional).
+	requestHook RequestHook
+
+	// responseHook is called after each HTTP response (optional).
+	responseHook ResponseHook
 }
 
 // NewClient creates a new Stromboli API client.
@@ -108,7 +108,6 @@ type Client struct {
 //
 //	client, err := stromboli.NewClient("http://localhost:8585",
 //	    stromboli.WithTimeout(5*time.Minute),
-//	    stromboli.WithRetries(3),
 //	    stromboli.WithHTTPClient(customHTTPClient),
 //	)
 //	if err != nil {
@@ -132,10 +131,15 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 
 	c := &Client{
 		baseURL:    baseURL,
-		httpClient: http.DefaultClient,
+		httpClient: &http.Client{},
 		timeout:    defaultTimeout,
-		maxRetries: defaultMaxRetries,
 		userAgent:  fmt.Sprintf("stromboli-go/%s", Version),
+	}
+
+	// Safely clone transport if possible - avoids panic if DefaultTransport
+	// is not a *http.Transport (e.g., in test environments or custom setups)
+	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+		c.httpClient.Transport = t.Clone()
 	}
 
 	// Apply options
@@ -149,21 +153,36 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 	return c, nil
 }
 
-// userAgentTransport wraps http.RoundTripper to add User-Agent header.
+// userAgentTransport wraps http.RoundTripper to add User-Agent header and invoke hooks.
 type userAgentTransport struct {
-	base      http.RoundTripper
-	userAgent string
+	base         http.RoundTripper
+	userAgent    string
+	requestHook  RequestHook
+	responseHook ResponseHook
 }
 
 // RoundTrip implements http.RoundTripper.
 func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", t.userAgent)
+
+	// Call request hook if set
+	if t.requestHook != nil {
+		t.requestHook(req)
+	}
+
 	base := t.base
 	if base == nil {
 		base = http.DefaultTransport
 	}
-	return base.RoundTrip(req)
+	resp, err := base.RoundTrip(req)
+
+	// Call response hook if set (even on error, resp may be non-nil)
+	if t.responseHook != nil && resp != nil {
+		t.responseHook(resp)
+	}
+
+	return resp, err
 }
 
 // newGeneratedClient creates the underlying go-swagger client.
@@ -177,15 +196,31 @@ func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
 		schemes = []string{"http"}
 	}
 
-	// Create transport with user agent
+	// Create transport with user agent and hooks
 	transport := httptransport.New(u.Host, u.Path, schemes)
 	transport.Transport = &userAgentTransport{
-		base:      c.httpClient.Transport,
-		userAgent: c.userAgent,
+		base:         c.httpClient.Transport,
+		userAgent:    c.userAgent,
+		requestHook:  c.requestHook,
+		responseHook: c.responseHook,
 	}
 
 	// Create client
 	return generatedclient.New(transport, strfmt.Default)
+}
+
+// effectiveTimeout returns the shorter of the client timeout and context deadline.
+// This ensures the documented behavior where the effective timeout is the minimum
+// of the client's configured timeout and the context's deadline.
+func (c *Client) effectiveTimeout(ctx context.Context) time.Duration {
+	timeout := c.timeout
+	if deadline, ok := ctx.Deadline(); ok {
+		remaining := time.Until(deadline)
+		if remaining > 0 && remaining < timeout {
+			timeout = remaining
+		}
+	}
+	return timeout
 }
 
 // ----------------------------------------------------------------------------
@@ -225,7 +260,7 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 	// Create request parameters with context
 	params := system.NewGetHealthParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.System.GetHealth(params)
@@ -286,7 +321,7 @@ func (c *Client) ClaudeStatus(ctx context.Context) (*ClaudeStatus, error) {
 	// Create request parameters with context
 	params := system.NewGetClaudeStatusParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.System.GetClaudeStatus(params)
@@ -358,6 +393,15 @@ func (c *Client) ClaudeStatus(ctx context.Context) (*ClaudeStatus, error) {
 //	    },
 //	})
 //
+// # Timeout Behavior
+//
+// The effective request timeout is determined by the shorter of:
+//   - The client's configured timeout (via [WithTimeout])
+//   - The context's deadline (if set via [context.WithTimeout])
+//
+// For long-running tasks, either increase the client timeout or use
+// [Client.RunAsync] instead.
+//
 // The context can be used for cancellation:
 //
 //	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
@@ -371,13 +415,20 @@ func (c *Client) Run(ctx context.Context, req *RunRequest) (*RunResponse, error)
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate JSON schema if provided
+	if req.Claude != nil && req.Claude.JSONSchema != "" {
+		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
+			return nil, newError("BAD_REQUEST", fmt.Sprintf("invalid JSON schema: %v", err), 400, nil)
+		}
+	}
+
 	// Convert to generated model
-	genReq := c.toGeneratedRunRequest(req)
+	genReq := toGeneratedRunRequest(req)
 
 	// Create request parameters
 	params := execution.NewPostRunParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(genReq)
 
 	// Execute request
@@ -452,13 +503,20 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate JSON schema if provided
+	if req.Claude != nil && req.Claude.JSONSchema != "" {
+		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
+			return nil, newError("BAD_REQUEST", fmt.Sprintf("invalid JSON schema: %v", err), 400, nil)
+		}
+	}
+
 	// Convert to generated model
-	genReq := c.toGeneratedRunRequest(req)
+	genReq := toGeneratedRunRequest(req)
 
 	// Create request parameters
 	params := execution.NewPostRunAsyncParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(genReq)
 
 	// Execute request
@@ -478,8 +536,8 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 	}, nil
 }
 
-// toGeneratedRunRequest converts our RunRequest to the generated model.
-func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
+// toGeneratedRunRequest converts a RunRequest to the generated model.
+func toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 	prompt := req.Prompt
 	genReq := &models.RunRequest{
 		Prompt:     &prompt,
@@ -487,70 +545,76 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 		WebhookURL: req.WebhookURL,
 	}
 
-	// Convert Claude options
+	// Convert Claude options - only populate if user provided them
 	if req.Claude != nil {
-		genReq.Claude.Model = req.Claude.Model
-		genReq.Claude.SessionID = req.Claude.SessionID
-		genReq.Claude.Resume = req.Claude.Resume
-		genReq.Claude.MaxBudgetUsd = req.Claude.MaxBudgetUSD
-		genReq.Claude.SystemPrompt = req.Claude.SystemPrompt
-		genReq.Claude.AppendSystemPrompt = req.Claude.AppendSystemPrompt
-		genReq.Claude.AllowedTools = req.Claude.AllowedTools
-		genReq.Claude.DisallowedTools = req.Claude.DisallowedTools
-		genReq.Claude.DangerouslySkipPermissions = req.Claude.DangerouslySkipPermissions
-		genReq.Claude.PermissionMode = req.Claude.PermissionMode
-		genReq.Claude.OutputFormat = req.Claude.OutputFormat
-		genReq.Claude.JSONSchema = req.Claude.JSONSchema
-		genReq.Claude.Verbose = req.Claude.Verbose
-		genReq.Claude.Debug = req.Claude.Debug
-		genReq.Claude.Continue = req.Claude.Continue
-		genReq.Claude.Agent = req.Claude.Agent
-		genReq.Claude.FallbackModel = req.Claude.FallbackModel
-
-		// New fields from API v0.4.0-alpha
-		genReq.Claude.AddDirs = req.Claude.AddDirs
-		genReq.Claude.Agents = req.Claude.Agents
-		genReq.Claude.AllowDangerouslySkipPermissions = req.Claude.AllowDangerouslySkipPermissions
-		genReq.Claude.Betas = req.Claude.Betas
-		genReq.Claude.DisableSlashCommands = req.Claude.DisableSlashCommands
-		genReq.Claude.Files = req.Claude.Files
-		genReq.Claude.ForkSession = req.Claude.ForkSession
-		genReq.Claude.IncludePartialMessages = req.Claude.IncludePartialMessages
-		genReq.Claude.InputFormat = req.Claude.InputFormat
-		genReq.Claude.McpConfigs = req.Claude.McpConfigs
-		genReq.Claude.NoPersistence = req.Claude.NoPersistence
-		genReq.Claude.PluginDirs = req.Claude.PluginDirs
-		genReq.Claude.ReplayUserMessages = req.Claude.ReplayUserMessages
-		genReq.Claude.SettingSources = req.Claude.SettingSources
-		genReq.Claude.Settings = req.Claude.Settings
-		genReq.Claude.StrictMcpConfig = req.Claude.StrictMcpConfig
-		genReq.Claude.Tools = req.Claude.Tools
+		genReq.Claude = models.StromboliInternalTypesClaudeOptions{
+			Model:                           string(req.Claude.Model),
+			SessionID:                       req.Claude.SessionID,
+			Resume:                          req.Claude.Resume,
+			MaxBudgetUsd:                    req.Claude.MaxBudgetUSD,
+			SystemPrompt:                    req.Claude.SystemPrompt,
+			AppendSystemPrompt:              req.Claude.AppendSystemPrompt,
+			AllowedTools:                    req.Claude.AllowedTools,
+			DisallowedTools:                 req.Claude.DisallowedTools,
+			DangerouslySkipPermissions:      req.Claude.DangerouslySkipPermissions,
+			PermissionMode:                  req.Claude.PermissionMode,
+			OutputFormat:                    req.Claude.OutputFormat,
+			JSONSchema:                      req.Claude.JSONSchema,
+			Verbose:                         req.Claude.Verbose,
+			Debug:                           req.Claude.Debug,
+			Continue:                        req.Claude.Continue,
+			Agent:                           req.Claude.Agent,
+			FallbackModel:                   req.Claude.FallbackModel,
+			AddDirs:                         req.Claude.AddDirs,
+			Agents:                          req.Claude.Agents,
+			AllowDangerouslySkipPermissions: req.Claude.AllowDangerouslySkipPermissions,
+			Betas:                           req.Claude.Betas,
+			DisableSlashCommands:            req.Claude.DisableSlashCommands,
+			Files:                           req.Claude.Files,
+			ForkSession:                     req.Claude.ForkSession,
+			IncludePartialMessages:          req.Claude.IncludePartialMessages,
+			InputFormat:                     req.Claude.InputFormat,
+			McpConfigs:                      req.Claude.McpConfigs,
+			NoPersistence:                   req.Claude.NoPersistence,
+			PluginDirs:                      req.Claude.PluginDirs,
+			ReplayUserMessages:              req.Claude.ReplayUserMessages,
+			SettingSources:                  req.Claude.SettingSources,
+			Settings:                        req.Claude.Settings,
+			StrictMcpConfig:                 req.Claude.StrictMcpConfig,
+			Tools:                           req.Claude.Tools,
+		}
 	}
 
-	// Convert Podman options
+	// Convert Podman options - only populate if user provided them
 	if req.Podman != nil {
-		genReq.Podman.Memory = req.Podman.Memory
-		genReq.Podman.Timeout = req.Podman.Timeout
-		genReq.Podman.Cpus = req.Podman.Cpus
-		genReq.Podman.CPUShares = req.Podman.CPUShares
-		genReq.Podman.Volumes = req.Podman.Volumes
-		genReq.Podman.Image = req.Podman.Image
-		genReq.Podman.SecretsEnv = req.Podman.SecretsEnv
-
-		// Convert lifecycle hooks
-		if req.Podman.Lifecycle != nil {
-			genReq.Podman.Lifecycle.OnCreateCommand = req.Podman.Lifecycle.OnCreateCommand
-			genReq.Podman.Lifecycle.PostCreate = req.Podman.Lifecycle.PostCreate
-			genReq.Podman.Lifecycle.PostStart = req.Podman.Lifecycle.PostStart
-			genReq.Podman.Lifecycle.HooksTimeout = req.Podman.Lifecycle.HooksTimeout
+		genReq.Podman = models.StromboliInternalTypesPodmanOptions{
+			Memory:     req.Podman.Memory,
+			Timeout:    req.Podman.Timeout,
+			Cpus:       req.Podman.Cpus,
+			CPUShares:  req.Podman.CPUShares,
+			Volumes:    req.Podman.Volumes,
+			Image:      req.Podman.Image,
+			SecretsEnv: req.Podman.SecretsEnv,
 		}
 
-		// Convert environment config
+		// Only set nested structs if user provided them
+		if req.Podman.Lifecycle != nil {
+			genReq.Podman.Lifecycle = models.StromboliInternalTypesLifecycleHooks{
+				OnCreateCommand: req.Podman.Lifecycle.OnCreateCommand,
+				PostCreate:      req.Podman.Lifecycle.PostCreate,
+				PostStart:       req.Podman.Lifecycle.PostStart,
+				HooksTimeout:    req.Podman.Lifecycle.HooksTimeout,
+			}
+		}
+
+		// Only set environment config if user provided it
 		if req.Podman.Environment != nil {
-			genReq.Podman.Environment.Type = req.Podman.Environment.Type
-			genReq.Podman.Environment.Path = req.Podman.Environment.Path
-			genReq.Podman.Environment.Service = req.Podman.Environment.Service
-			genReq.Podman.Environment.BuildTimeout = req.Podman.Environment.BuildTimeout
+			genReq.Podman.Environment = models.StromboliInternalTypesEnvironmentConfig{
+				Type:         req.Podman.Environment.Type,
+				Path:         req.Podman.Environment.Path,
+				Service:      req.Podman.Environment.Service,
+				BuildTimeout: req.Podman.Environment.BuildTimeout,
+			}
 		}
 	}
 
@@ -590,7 +654,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]*Job, error) {
 	// Create request parameters with context
 	params := jobs.NewGetJobsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Jobs.GetJobs(params)
@@ -608,7 +672,7 @@ func (c *Client) ListJobs(ctx context.Context) ([]*Job, error) {
 	result := make([]*Job, 0, len(payload.Jobs))
 	for _, j := range payload.Jobs {
 		if j != nil {
-			result = append(result, c.fromGeneratedJobResponse(j))
+			result = append(result, fromGeneratedJobResponse(j))
 		}
 	}
 
@@ -656,7 +720,7 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
 	// Create request parameters with context
 	params := jobs.NewGetJobsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(jobID)
 
 	// Execute request
@@ -671,7 +735,7 @@ func (c *Client) GetJob(ctx context.Context, jobID string) (*Job, error) {
 		return nil, newError("INVALID_RESPONSE", "empty job response", 0, nil)
 	}
 
-	return c.fromGeneratedJobResponse(payload), nil
+	return fromGeneratedJobResponse(payload), nil
 }
 
 // CancelJob cancels a pending or running job.
@@ -709,7 +773,7 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	// Create request parameters with context
 	params := jobs.NewDeleteJobsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(jobID)
 
 	// Execute request
@@ -722,7 +786,7 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 }
 
 // fromGeneratedJobResponse converts a generated JobResponse to our Job type.
-func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
+func fromGeneratedJobResponse(j *models.JobResponse) *Job {
 	job := &Job{
 		ID:        j.ID,
 		Status:    string(j.Status),
@@ -781,7 +845,7 @@ func (c *Client) ListSessions(ctx context.Context) ([]string, error) {
 	// Create request parameters with context
 	params := sessions.NewGetSessionsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Sessions.GetSessions(params)
@@ -831,7 +895,7 @@ func (c *Client) DestroySession(ctx context.Context, sessionID string) error {
 	// Create request parameters with context
 	params := sessions.NewDeleteSessionsIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 
 	// Execute request
@@ -881,7 +945,7 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 	// Create request parameters with context
 	params := sessions.NewGetSessionsIDMessagesParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 
 	// Apply options if provided
@@ -910,7 +974,7 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 	messages := make([]*Message, 0, len(payload.Messages))
 	for _, m := range payload.Messages {
 		if m != nil {
-			messages = append(messages, c.fromGeneratedMessage(m))
+			messages = append(messages, fromGeneratedMessage(m))
 		}
 	}
 
@@ -948,7 +1012,7 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 	// Create request parameters with context
 	params := sessions.NewGetSessionsIDMessagesMessageIDParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetID(sessionID)
 	params.SetMessageID(messageID)
 
@@ -964,11 +1028,11 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 		return nil, newError("INVALID_RESPONSE", "empty message response", 0, nil)
 	}
 
-	return c.fromGeneratedMessage(payload.Message), nil
+	return fromGeneratedMessage(payload.Message), nil
 }
 
 // fromGeneratedMessage converts a generated message to our Message type.
-func (c *Client) fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
+func fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
 	return &Message{
 		UUID:           m.UUID,
 		Type:           string(m.Type),
@@ -1021,31 +1085,42 @@ func (c *Client) handleError(err error, message string) error {
 	return wrapError(err, "REQUEST_FAILED", message, 0)
 }
 
+// httpStatusToErrorCode maps HTTP status codes to error codes for table-driven error handling.
+var httpStatusToErrorCode = map[int]string{
+	http.StatusBadRequest:          ErrBadRequest.Code,
+	http.StatusUnauthorized:        ErrUnauthorized.Code,
+	http.StatusForbidden:           "FORBIDDEN",
+	http.StatusNotFound:            ErrNotFound.Code,
+	http.StatusConflict:            "CONFLICT",
+	http.StatusRequestTimeout:      ErrTimeout.Code,
+	http.StatusTooManyRequests:     ErrRateLimited.Code,
+	http.StatusServiceUnavailable:  ErrUnavailable.Code,
+	http.StatusInternalServerError: ErrInternal.Code,
+}
+
 // handleAPIError converts go-swagger API errors into SDK errors.
-func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error {
+// It wraps sentinel errors so that errors.Is works consistently.
+// The original server error message is preserved in the Cause chain.
+func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) error {
 	status := apiErr.Code
 
-	switch status {
-	case http.StatusBadRequest:
-		return newError("BAD_REQUEST", message, status, apiErr)
-	case http.StatusUnauthorized:
-		return newError("UNAUTHORIZED", "authentication required", status, apiErr)
-	case http.StatusForbidden:
-		return newError("FORBIDDEN", "access denied", status, apiErr)
-	case http.StatusNotFound:
-		return newError("NOT_FOUND", "resource not found", status, apiErr)
-	case http.StatusConflict:
-		return newError("CONFLICT", "resource already exists", status, apiErr)
-	case http.StatusRequestTimeout:
-		return newError("TIMEOUT", "request timed out", status, apiErr)
-	case http.StatusTooManyRequests:
-		return newError("RATE_LIMITED", "too many requests", status, apiErr)
-	default:
-		if status >= http.StatusInternalServerError {
-			return newError("INTERNAL", "server error", status, apiErr)
-		}
-		return newError("REQUEST_FAILED", message, status, apiErr)
+	// Extract server message if available, otherwise use fallback
+	serverMsg := apiErr.Error()
+	if serverMsg == "" {
+		serverMsg = fallbackMsg
 	}
+
+	// Look up error code in table
+	if code, ok := httpStatusToErrorCode[status]; ok {
+		return wrapError(apiErr, code, serverMsg, status)
+	}
+
+	// Handle other 5xx errors
+	if status >= http.StatusInternalServerError {
+		return wrapError(apiErr, ErrInternal.Code, serverMsg, status)
+	}
+
+	return newError("REQUEST_FAILED", serverMsg, status, apiErr)
 }
 
 // ----------------------------------------------------------------------------
@@ -1121,13 +1196,14 @@ func (c *Client) GetToken(ctx context.Context, clientID string) (*TokenResponse,
 	// Create request parameters
 	params := auth.NewPostAuthTokenParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(&models.TokenRequest{
 		ClientID: &clientID,
 	})
 
-	// Execute request (uses bearer auth if token is set, for security)
-	resp, err := c.api.Auth.PostAuthToken(params, c.bearerAuth())
+	// Execute request - GetToken doesn't require authentication
+	// Pass nil auth writer to avoid sending empty Bearer header
+	resp, err := c.api.Auth.PostAuthToken(params, nil)
 	if err != nil {
 		return nil, c.handleError(err, "failed to get token")
 	}
@@ -1169,7 +1245,7 @@ func (c *Client) RefreshToken(ctx context.Context, refreshToken string) (*TokenR
 	// Create request parameters
 	params := auth.NewPostAuthRefreshParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(&models.RefreshRequest{
 		RefreshToken: &refreshToken,
 	})
@@ -1219,7 +1295,7 @@ func (c *Client) ValidateToken(ctx context.Context) (*TokenValidation, error) {
 	// Create request parameters
 	params := auth.NewGetAuthValidateParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request with bearer auth
 	resp, err := c.api.Auth.GetAuthValidate(params, c.bearerAuth())
@@ -1266,7 +1342,7 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 	// Create request parameters
 	params := auth.NewPostAuthLogoutParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request with bearer auth
 	resp, err := c.api.Auth.PostAuthLogout(params, c.bearerAuth())
@@ -1322,7 +1398,7 @@ func (c *Client) ListSecrets(ctx context.Context) ([]*Secret, error) {
 	// Create request parameters
 	params := secrets.NewGetSecretsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Secrets.GetSecrets(params)
@@ -1391,7 +1467,7 @@ func (c *Client) CreateSecret(ctx context.Context, req *CreateSecretRequest) err
 	// Create request parameters
 	params := secrets.NewPostSecretsParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetRequest(&models.CreateSecretRequest{
 		Name:  &req.Name,
 		Value: &req.Value,
@@ -1453,7 +1529,7 @@ func (c *Client) GetSecret(ctx context.Context, name string) (*Secret, error) {
 	// Create request parameters
 	params := secrets.NewGetSecretsNameParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetName(name)
 
 	// Execute request
@@ -1507,7 +1583,7 @@ func (c *Client) DeleteSecret(ctx context.Context, name string) error {
 	// Create request parameters
 	params := secrets.NewDeleteSecretsNameParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetName(name)
 
 	// Execute request
@@ -1550,7 +1626,7 @@ func (c *Client) ListImages(ctx context.Context) ([]*Image, error) {
 	// Create request parameters
 	params := images.NewGetImagesParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	// Execute request
 	resp, err := c.api.Images.GetImages(params)
@@ -1568,7 +1644,7 @@ func (c *Client) ListImages(ctx context.Context) ([]*Image, error) {
 	result := make([]*Image, 0, len(payload.Images))
 	for _, img := range payload.Images {
 		if img != nil {
-			result = append(result, c.fromGeneratedImage(img))
+			result = append(result, fromGeneratedImage(img))
 		}
 	}
 
@@ -1604,7 +1680,7 @@ func (c *Client) GetImage(ctx context.Context, name string) (*Image, error) {
 	// Create request parameters
 	params := images.NewGetImagesNameParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetName(name)
 
 	// Execute request
@@ -1624,7 +1700,7 @@ func (c *Client) GetImage(ctx context.Context, name string) (*Image, error) {
 		return nil, newError("INVALID_RESPONSE", "empty image response", 0, nil)
 	}
 
-	return c.fromGeneratedImageDetail(payload), nil
+	return fromGeneratedImageDetail(payload), nil
 }
 
 // SearchImages searches container registries for images matching the query.
@@ -1653,7 +1729,7 @@ func (c *Client) SearchImages(ctx context.Context, opts *SearchImagesOptions) ([
 	// Create request parameters
 	params := images.NewGetImagesSearchParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 	params.SetQ(opts.Query)
 
 	if opts.Limit > 0 {
@@ -1721,7 +1797,7 @@ func (c *Client) PullImage(ctx context.Context, req *PullImageRequest) (*PullIma
 	// Create request parameters
 	params := images.NewPostImagesPullParams()
 	params.SetContext(ctx)
-	params.SetTimeout(c.timeout)
+	params.SetTimeout(c.effectiveTimeout(ctx))
 
 	image := req.Image
 	params.SetRequest(&models.ImagePullRequest{
@@ -1750,7 +1826,7 @@ func (c *Client) PullImage(ctx context.Context, req *PullImageRequest) (*PullIma
 }
 
 // fromGeneratedImage converts a generated ImageInfoResponse to our Image type.
-func (c *Client) fromGeneratedImage(img *models.ImageInfoResponse) *Image {
+func fromGeneratedImage(img *models.ImageInfoResponse) *Image {
 	return &Image{
 		ID:                img.ID,
 		Repository:        img.Repository,
@@ -1766,7 +1842,7 @@ func (c *Client) fromGeneratedImage(img *models.ImageInfoResponse) *Image {
 }
 
 // fromGeneratedImageDetail converts a generated ImageDetailResponse to our Image type.
-func (c *Client) fromGeneratedImageDetail(img *models.ImageDetailResponse) *Image {
+func fromGeneratedImageDetail(img *models.ImageDetailResponse) *Image {
 	return &Image{
 		ID:                img.ID,
 		Repository:        img.Repository,
@@ -1779,4 +1855,28 @@ func (c *Client) fromGeneratedImageDetail(img *models.ImageDetailResponse) *Imag
 		HasClaudeCLI:      img.HasClaudeCli,
 		Tools:             img.Tools,
 	}
+}
+
+// validateJSONSchema checks if the schema is valid JSON and has basic schema properties.
+// It validates that the schema contains at least one of the required schema keywords.
+func validateJSONSchema(schema string) error {
+	if !json.Valid([]byte(schema)) {
+		return fmt.Errorf("not valid JSON")
+	}
+
+	// Parse the schema to check for required properties
+	var s map[string]interface{}
+	if err := json.Unmarshal([]byte(schema), &s); err != nil {
+		return err
+	}
+
+	// Check for at least one valid JSON Schema keyword
+	validKeywords := []string{"type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"}
+	for _, keyword := range validKeywords {
+		if _, ok := s[keyword]; ok {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("schema must have 'type', '$ref', 'oneOf', 'anyOf', 'allOf', 'enum', or 'const'")
 }

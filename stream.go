@@ -8,13 +8,21 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 )
 
-// maxErrorBodySize limits the size of error response bodies to prevent
-// memory exhaustion from malicious or misconfigured servers.
+// maxErrorBodySize limits the size of error response bodies read from the server.
+// This prevents memory exhaustion from malicious or misconfigured servers that
+// might return extremely large error responses. 4KB is sufficient for most
+// error messages while providing a safety limit.
 const maxErrorBodySize = 4096
+
+// maxEventSize limits the maximum size of a single SSE event to prevent
+// memory exhaustion from malformed or malicious servers that might send
+// events without proper empty line delimiters.
+const maxEventSize = 10 * 1024 * 1024 // 10MB
 
 // StreamRequest represents a request for streaming Claude output.
 //
@@ -142,10 +150,67 @@ func (s *Stream) Close() error {
 	return nil
 }
 
+// EventsWithContext returns a channel that yields events from the stream.
+//
+// The channel is closed when the stream ends, an error occurs, or the
+// context is cancelled. This is the preferred method to avoid goroutine
+// leaks if you stop reading before the stream ends.
+//
+// Example:
+//
+//	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+//	defer cancel()
+//
+//	for event := range stream.EventsWithContext(ctx) {
+//	    fmt.Print(event.Data)
+//	}
+//	if err := stream.Err(); err != nil {
+//	    log.Fatal(err)
+//	}
+func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
+	ch := make(chan *StreamEvent)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
+			}
+			close(ch)
+		}()
+
+		// Watch for context cancellation to close stream and unblock reader.
+		// This prevents goroutine leaks when context is cancelled while
+		// the reader is blocked on network I/O.
+		done := make(chan struct{})
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = s.Close() // Unblocks the reader
+			case <-done:
+			}
+		}()
+		defer close(done)
+
+		for s.Next() {
+			// Copy the event to avoid race condition when consumer
+			// reads while we iterate to the next event.
+			event := *s.current
+			select {
+			case ch <- &event:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return ch
+}
+
 // Events returns a channel that yields events from the stream.
 //
 // The channel is closed when the stream ends or an error occurs.
 // Check [Stream.Err] after the channel closes to see if an error occurred.
+//
+// Deprecated: Use [Stream.EventsWithContext] to avoid goroutine leaks if you
+// stop reading before the stream ends.
 //
 // Example:
 //
@@ -156,28 +221,14 @@ func (s *Stream) Close() error {
 //	    log.Fatal(err)
 //	}
 func (s *Stream) Events() <-chan *StreamEvent {
-	ch := make(chan *StreamEvent)
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.err = fmt.Errorf("panic in stream reader: %v", r)
-			}
-			close(ch)
-		}()
-		for s.Next() {
-			// Copy the event to avoid race condition when consumer
-			// reads while we iterate to the next event.
-			event := *s.current
-			ch <- &event
-		}
-	}()
-	return ch
+	return s.EventsWithContext(context.Background())
 }
 
 // readEvent reads the next SSE event from the stream.
 func (s *Stream) readEvent() (*StreamEvent, error) {
 	event := &StreamEvent{}
 	hasData := false
+	totalSize := 0
 
 	for {
 		line, err := s.reader.ReadString('\n')
@@ -187,6 +238,12 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 				return event, nil
 			}
 			return nil, err
+		}
+
+		// Track event size to prevent memory exhaustion from malformed streams
+		totalSize += len(line)
+		if totalSize > maxEventSize {
+			return nil, fmt.Errorf("event exceeds maximum size of %d bytes", maxEventSize)
 		}
 
 		// Remove trailing newline
@@ -241,13 +298,16 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 //
 // # Timeout Behavior
 //
-// The client timeout ([WithTimeout]) does NOT apply to streaming requests
-// because streams are designed for long-running connections. Use
-// context.WithTimeout to set a deadline:
+// WARNING: The client timeout ([WithTimeout]) does NOT apply to streaming
+// requests. If no context deadline is set and the server stops responding,
+// this method may block indefinitely. Always use context.WithTimeout:
 //
 //	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 //	defer cancel()
 //	stream, err := client.Stream(ctx, req)
+//
+// The timeout behavior differs from regular requests because streams are
+// designed for long-running connections where data arrives incrementally.
 //
 // # Basic Usage
 //
@@ -336,6 +396,10 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Execute request
 	resp, err := c.httpClient.Do(httpReq)
 	if err != nil {
+		// Close response body if present to prevent resource leak
+		if resp != nil && resp.Body != nil {
+			_ = resp.Body.Close()
+		}
 		return nil, c.handleError(err, "failed to connect to stream")
 	}
 
