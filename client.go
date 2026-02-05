@@ -1337,9 +1337,9 @@ func (c *Client) GetToken(ctx context.Context, clientID string) (*TokenResponse,
 		ClientID: &clientID,
 	})
 
-	// Execute request - GetToken doesn't require authentication
-	// Pass nil auth writer to avoid sending empty Bearer header
-	resp, err := c.api.Auth.PostAuthToken(params, nil)
+	// Execute request - GetToken uses bearerAuth which only sets header if token exists.
+	// This allows the endpoint to work both with and without prior authentication.
+	resp, err := c.api.Auth.PostAuthToken(params, c.bearerAuth())
 	if err != nil {
 		return nil, c.handleError(err, "failed to get token")
 	}
