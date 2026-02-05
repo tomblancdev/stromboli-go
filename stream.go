@@ -21,8 +21,9 @@ const maxErrorBodySize = 4096
 
 // maxEventSize limits the maximum size of a single SSE event to prevent
 // memory exhaustion from malformed or malicious servers that might send
-// events without proper empty line delimiters.
-const maxEventSize = 10 * 1024 * 1024 // 10MB
+// events without proper empty line delimiters. 1MB is generous for LLM
+// streaming output while providing protection against DoS attacks.
+const maxEventSize = 1 * 1024 * 1024 // 1MB
 
 // StreamRequest represents a request for streaming Claude output.
 //
@@ -121,7 +122,14 @@ func (s *Stream) Event() *StreamEvent {
 
 // Err returns any error that occurred during streaming.
 //
-// Returns nil if the stream completed successfully or is still active.
+// Returns nil if:
+//   - The stream completed successfully (normal EOF)
+//   - The stream is still active
+//   - No error has occurred yet
+//
+// To distinguish between "completed successfully" and "still active",
+// check if [Stream.Next] returned false. After Next returns false,
+// Err() == nil means normal completion; Err() != nil means an error.
 func (s *Stream) Err() error {
 	return s.err
 }
@@ -216,6 +224,11 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 		go func() {
 			select {
 			case <-ctx.Done():
+				// Set error before cleanup so consumer knows cancellation occurred.
+				// Only set if no other error exists (preserve original error).
+				if s.err == nil {
+					s.err = ctx.Err()
+				}
 				cleanup() // Unblocks the reader
 			case <-done:
 				// Reader completed normally, no need to cleanup
@@ -497,9 +510,9 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 
 	// Check response status
 	if resp.StatusCode != http.StatusOK {
-		defer func() { _ = resp.Body.Close() }()
 		// Limit body read to prevent memory exhaustion from large error responses
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+		_ = resp.Body.Close() // Close explicitly instead of defer for clarity
 		cancelOnError()
 		return nil, newError(
 			"STREAM_ERROR",
@@ -512,7 +525,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Verify content type (case-insensitive per HTTP spec)
 	contentType := resp.Header.Get("Content-Type")
 	if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
-		defer func() { _ = resp.Body.Close() }()
+		_ = resp.Body.Close() // Close explicitly instead of defer for clarity
 		cancelOnError()
 		return nil, newError(
 			"INVALID_RESPONSE",

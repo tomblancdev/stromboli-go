@@ -2759,8 +2759,8 @@ func TestValidateJSONSchema_InvalidSchemas(t *testing.T) {
 		errContains string
 	}{
 		{"invalid JSON", `{not json}`, "not valid JSON"},
-		{"missing schema keyword", `{"foo":"bar"}`, "schema must have"},
-		{"empty object", `{}`, "schema must have"},
+		{"missing schema keyword", `{"foo":"bar"}`, "JSON Schema keyword"},
+		{"empty object", `{}`, "JSON Schema keyword"},
 	}
 
 	for _, tt := range tests {

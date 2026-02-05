@@ -1989,7 +1989,7 @@ func validateRequestSize(req *RunRequest) error {
 //
 // WARNING: This does NOT validate JSON Schema compliance. It only checks:
 //   - The string is valid JSON
-//   - At least one schema keyword exists (type, $ref, oneOf, anyOf, allOf, enum, const)
+//   - At least one recognized schema keyword exists
 //
 // Invalid schemas WILL pass this check and fail server-side.
 // For production use, pre-validate schemas with a JSON Schema library such as:
@@ -2002,13 +2002,29 @@ func validateJSONSchema(schema string) error {
 		return fmt.Errorf("not valid JSON: %w", err)
 	}
 
-	// Check for at least one valid JSON Schema keyword
-	validKeywords := []string{"type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const"}
+	// Check for at least one valid JSON Schema keyword.
+	// This list covers the most common structural keywords from JSON Schema
+	// draft-07 and later. It's intentionally broad to avoid rejecting
+	// valid schemas while still catching obvious non-schemas like {"foo": 1}.
+	validKeywords := []string{
+		// Type keywords
+		"type", "$ref", "oneOf", "anyOf", "allOf", "enum", "const",
+		// Object keywords
+		"properties", "required", "additionalProperties", "patternProperties",
+		// Array keywords
+		"items", "additionalItems", "contains",
+		// Schema composition
+		"definitions", "$defs", "not", "if", "then", "else",
+		// Validation keywords
+		"minimum", "maximum", "minLength", "maxLength", "pattern",
+		"minItems", "maxItems", "uniqueItems",
+		"minProperties", "maxProperties",
+	}
 	for _, keyword := range validKeywords {
 		if _, ok := s[keyword]; ok {
 			return nil
 		}
 	}
 
-	return fmt.Errorf("schema must have 'type', '$ref', 'oneOf', 'anyOf', 'allOf', 'enum', or 'const'")
+	return fmt.Errorf("schema must contain at least one JSON Schema keyword (type, properties, items, etc.)")
 }
