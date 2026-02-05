@@ -336,7 +336,8 @@ func (c *Client) Health(ctx context.Context) (*HealthResponse, error) {
 		return nil, newError("INVALID_RESPONSE", "empty health response", 0, nil)
 	}
 
-	// Map components
+	// Map components.
+	// Note: len(nil) returns 0 in Go, so this is safe even if Components is nil.
 	components := make([]ComponentHealth, 0, len(payload.Components))
 	for _, comp := range payload.Components {
 		if comp != nil {

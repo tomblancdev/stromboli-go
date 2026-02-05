@@ -195,8 +195,25 @@ var (
 	}
 
 	// ErrRateLimited indicates too many requests were made.
-	// Check RetryAfter for how long to wait before retrying.
 	// HTTP status: 429.
+	//
+	// NOTE: The RetryAfter field is not automatically populated because
+	// the go-swagger client doesn't expose response headers in error responses.
+	// To capture the Retry-After header, use [WithResponseHook] to inspect
+	// the response before the error is returned:
+	//
+	//	var retryAfter time.Duration
+	//	client, _ := stromboli.NewClient(url,
+	//	    stromboli.WithResponseHook(func(resp *http.Response) {
+	//	        if resp.StatusCode == 429 {
+	//	            if s := resp.Header.Get("Retry-After"); s != "" {
+	//	                if seconds, err := strconv.Atoi(s); err == nil {
+	//	                    retryAfter = time.Duration(seconds) * time.Second
+	//	                }
+	//	            }
+	//	        }
+	//	    }),
+	//	)
 	ErrRateLimited = &Error{
 		Code:    "RATE_LIMITED",
 		Message: "too many requests",
