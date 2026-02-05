@@ -31,15 +31,18 @@ const (
 	defaultTimeout = 30 * time.Second
 
 	// maxPromptSize limits the maximum prompt size to prevent memory exhaustion.
-	// 1MB should accommodate even very large prompts while providing a safety limit.
+	// 1MB chosen based on Claude's typical context window (~200k tokens ≈ 800KB text)
+	// with headroom for encoding overhead.
 	maxPromptSize = 1 * 1024 * 1024 // 1MB
 
 	// maxSystemPromptSize limits the maximum system prompt size.
-	// System prompts are typically smaller than user prompts.
+	// System prompts are typically much shorter than user prompts.
+	// 256KB allows for detailed instructions while maintaining safety.
 	maxSystemPromptSize = 256 * 1024 // 256KB
 
 	// maxJSONSchemaSize limits the maximum JSON schema size.
-	// JSON schemas are typically small, but complex schemas can be larger.
+	// Most schemas are small (<10KB), but complex nested schemas can be larger.
+	// 64KB accommodates all reasonable use cases.
 	maxJSONSchemaSize = 64 * 1024 // 64KB
 )
 
@@ -56,6 +59,10 @@ func getDefaultTransport() *http.Transport {
 	defaultTransportOnce.Do(func() {
 		if t, ok := http.DefaultTransport.(*http.Transport); ok {
 			defaultTransportCopy = t.Clone()
+		} else {
+			// This is rare but can happen if http.DefaultTransport was replaced
+			// with a custom implementation. Log a warning for debugging.
+			getLogger().Printf("stromboli: WARNING: http.DefaultTransport is not *http.Transport, using default settings")
 		}
 	})
 	return defaultTransportCopy
@@ -170,7 +177,8 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		userAgent:  fmt.Sprintf("stromboli-go/%s", Version),
 	}
 
-	// Use cached transport clone to avoid potential races with DefaultTransport.
+	// Clone the cached transport to give this client its own connection pool.
+	// This ensures clients don't interfere with each other's connections.
 	// getDefaultTransport() uses sync.Once to ensure thread-safe initialization.
 	if t := getDefaultTransport(); t != nil {
 		c.httpClient.Transport = t.Clone()
@@ -223,6 +231,10 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 }
 
 // newGeneratedClient creates the underlying go-swagger client.
+//
+// NOTE: Request and response hooks are captured at client creation time.
+// Changing hooks after client creation has no effect on the generated API client.
+// To use different hooks, create a new client.
 func (c *Client) newGeneratedClient() *generatedclient.StromboliAPI {
 	// URL already validated in NewClient
 	u, _ := url.Parse(c.baseURL)
@@ -254,9 +266,9 @@ func (c *Client) effectiveTimeout(ctx context.Context) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			// Deadline already passed - return minimal timeout.
-			// The request will likely fail immediately with context deadline exceeded.
-			return time.Millisecond
+			// Deadline already passed - return 0 to let the request
+			// fail immediately with context deadline exceeded error.
+			return 0
 		}
 		if remaining < timeout {
 			timeout = remaining
@@ -1186,12 +1198,17 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) er
 
 // bearerAuth returns a runtime.ClientAuthInfoWriter for Bearer token auth.
 //
-// Note: The token value is captured at the time this method is called.
-// If SetToken is called between bearerAuth() and the actual request execution,
-// the request will use the token value from when bearerAuth() was called.
-// This is typically the expected behavior for authenticated request sequences.
+// The token is read at the time the request is authenticated, not when
+// this method is called. This ensures the most current token is used,
+// which is important if SetToken is called between method calls.
 func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
-	return httptransport.BearerToken(c.getToken())
+	return runtime.ClientAuthInfoWriterFunc(func(r runtime.ClientRequest, _ strfmt.Registry) error {
+		token := c.getToken() // Read at write time
+		if token != "" {
+			return r.SetHeaderParam("Authorization", "Bearer "+token)
+		}
+		return nil
+	})
 }
 
 // getToken returns the current token (thread-safe).
@@ -1942,17 +1959,16 @@ func validateRequestSize(req *RunRequest) error {
 	return nil
 }
 
-// validateJSONSchema performs basic validation of a JSON schema string.
+// validateJSONSchema performs MINIMAL validation of a JSON schema string.
 //
-// This is a basic check that verifies:
+// WARNING: This does NOT validate JSON Schema compliance. It only checks:
 //   - The string is valid JSON
-//   - The schema contains at least one recognized schema keyword
-//     (type, $ref, oneOf, anyOf, allOf, enum, or const)
+//   - At least one schema keyword exists (type, $ref, oneOf, anyOf, allOf, enum, const)
 //
-// Note: This does NOT fully validate JSON Schema compliance.
-// Invalid schemas may pass this check but fail server-side validation.
-// For production use, consider pre-validating schemas with a dedicated
-// JSON Schema validator library.
+// Invalid schemas WILL pass this check and fail server-side.
+// For production use, pre-validate schemas with a JSON Schema library such as:
+//   - github.com/santhosh-tekuri/jsonschema
+//   - github.com/xeipuuv/gojsonschema
 func validateJSONSchema(schema string) error {
 	if !json.Valid([]byte(schema)) {
 		return fmt.Errorf("not valid JSON")

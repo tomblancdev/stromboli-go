@@ -582,6 +582,9 @@ func (j *Job) IsPending() bool {
 
 // CreatedAtTime parses CreatedAt as time.Time.
 // Returns zero time if CreatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, j.CreatedAt) directly.
 func (j *Job) CreatedAtTime() time.Time {
 	if j.CreatedAt == "" {
 		return time.Time{}
@@ -592,6 +595,9 @@ func (j *Job) CreatedAtTime() time.Time {
 
 // UpdatedAtTime parses UpdatedAt as time.Time.
 // Returns zero time if UpdatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, j.UpdatedAt) directly.
 func (j *Job) UpdatedAtTime() time.Time {
 	if j.UpdatedAt == "" {
 		return time.Time{}
@@ -744,6 +750,9 @@ type Message struct {
 
 // TimestampTime parses Timestamp as time.Time.
 // Returns zero time if Timestamp is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, m.Timestamp) directly.
 func (m *Message) TimestampTime() time.Time {
 	if m.Timestamp == "" {
 		return time.Time{}
@@ -818,6 +827,9 @@ type Secret struct {
 
 // CreatedAtTime parses CreatedAt as time.Time.
 // Returns zero time if CreatedAt is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, s.CreatedAt) directly.
 func (s *Secret) CreatedAtTime() time.Time {
 	if s.CreatedAt == "" {
 		return time.Time{}
@@ -901,6 +913,9 @@ type Image struct {
 
 // CreatedTime parses Created as time.Time.
 // Returns zero time if Created is empty or parsing fails.
+//
+// NOTE: Parsing errors are silently ignored. If you need to validate
+// the timestamp format, use time.Parse(time.RFC3339, i.Created) directly.
 func (i *Image) CreatedTime() time.Time {
 	if i.Created == "" {
 		return time.Time{}

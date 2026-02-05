@@ -3,6 +3,7 @@ package stromboli
 import (
 	"log"
 	"net/http"
+	"sync"
 	"time"
 )
 
@@ -19,12 +20,16 @@ func (defaultLogger) Printf(format string, v ...interface{}) {
 	log.Printf(format, v...)
 }
 
+// sdkLoggerMu protects sdkLogger for concurrent access.
+var sdkLoggerMu sync.RWMutex
+
 // sdkLogger is the logger used by the SDK for warnings and debug output.
-// Can be replaced via SetLogger.
+// Can be replaced via SetLogger. Access must be protected by sdkLoggerMu.
 var sdkLogger Logger = defaultLogger{}
 
 // SetLogger sets the logger used by the SDK for warnings and debug output.
 // Pass nil to restore the default logger (standard log package).
+// This function is safe for concurrent use.
 //
 // Example:
 //
@@ -34,11 +39,20 @@ var sdkLogger Logger = defaultLogger{}
 //	// Restore default
 //	stromboli.SetLogger(nil)
 func SetLogger(l Logger) {
+	sdkLoggerMu.Lock()
+	defer sdkLoggerMu.Unlock()
 	if l == nil {
 		sdkLogger = defaultLogger{}
 	} else {
 		sdkLogger = l
 	}
+}
+
+// getLogger returns the current logger (thread-safe).
+func getLogger() Logger {
+	sdkLoggerMu.RLock()
+	defer sdkLoggerMu.RUnlock()
+	return sdkLogger
 }
 
 // Option configures a [Client].
@@ -113,14 +127,18 @@ func WithStreamTimeout(d time.Duration) Option {
 // WithRetries sets the maximum number of retry attempts for failed requests.
 //
 // Deprecated: Retry logic is not implemented. This option logs a warning
-// and does nothing. Implement retry logic in your application or use a
-// library like hashicorp/go-retryablehttp. This will be removed in v1.0.
+// and does nothing. Consider using:
+//   - github.com/hashicorp/go-retryablehttp for automatic retries
+//   - github.com/cenkalti/backoff for custom retry logic
+//   - github.com/avast/retry-go for simple retry patterns
+//
+// This option will be removed in v1.0.
 //
 // Default: 0 (no retries).
 func WithRetries(n int) Option {
 	return func(_ *Client) {
 		if n > 0 {
-			sdkLogger.Printf("stromboli: WARNING: WithRetries(%d) is deprecated and has no effect", n)
+			getLogger().Printf("stromboli: WARNING: WithRetries(%d) is deprecated and has no effect", n)
 		}
 	}
 }

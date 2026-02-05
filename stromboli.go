@@ -52,6 +52,32 @@
 //	    log.Fatal(err)
 //	}
 //
+// # Streaming
+//
+// For real-time output, use the Stream method:
+//
+//	stream, err := client.Stream(ctx, &stromboli.StreamRequest{
+//	    Prompt: "Write a story",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	defer stream.Close()
+//
+//	for stream.Next() {
+//	    fmt.Print(stream.Event().Data)
+//	}
+//
+// # Authentication
+//
+// For authenticated endpoints, obtain and set a token:
+//
+//	tokens, _ := client.GetToken(ctx, "client-id")
+//	client.SetToken(tokens.AccessToken)
+//
+//	// Now authenticated methods work
+//	validation, _ := client.ValidateToken(ctx)
+//
 // # Error Handling
 //
 // The SDK provides typed errors for common failure cases:

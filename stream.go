@@ -81,6 +81,7 @@ type Stream struct {
 	current *StreamEvent
 	err     error
 	closed  atomic.Bool
+	cancel  context.CancelFunc // context cancel function for stream timeout
 }
 
 // Next advances to the next event in the stream.
@@ -144,6 +145,11 @@ func (s *Stream) Close() error {
 	if s.closed.Swap(true) {
 		return nil // Already closed
 	}
+	// Call cancel first to release context resources.
+	// This prevents the context from leaking if streamTimeout was applied.
+	if s.cancel != nil {
+		s.cancel()
+	}
 	if s.resp != nil && s.resp.Body != nil {
 		return s.resp.Body.Close()
 	}
@@ -180,7 +186,12 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 			})
 		}
 
+		// Signal channel for when reader completes normally.
+		// This allows the watcher goroutine to exit cleanly.
+		done := make(chan struct{})
+
 		defer func() {
+			close(done) // Signal watcher to exit
 			if r := recover(); r != nil {
 				s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
 			}
@@ -192,8 +203,12 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 		// This prevents goroutine leaks when context is cancelled while
 		// the reader is blocked on network I/O.
 		go func() {
-			<-ctx.Done()
-			cleanup() // Unblocks the reader
+			select {
+			case <-ctx.Done():
+				cleanup() // Unblocks the reader
+			case <-done:
+				// Reader completed normally, no need to cleanup
+			}
 		}()
 
 		for s.Next() {
@@ -233,6 +248,7 @@ func (s *Stream) Events() <-chan *StreamEvent {
 // readEvent reads the next SSE event from the stream.
 func (s *Stream) readEvent() (*StreamEvent, error) {
 	event := &StreamEvent{}
+	var dataBuilder strings.Builder
 	hasData := false
 	totalSize := 0
 
@@ -241,6 +257,7 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 		if err != nil {
 			if err == io.EOF && hasData {
 				// Return the event we have so far
+				event.Data = dataBuilder.String()
 				return event, nil
 			}
 			return nil, err
@@ -259,6 +276,7 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 		// Empty line marks end of event
 		if line == "" {
 			if hasData {
+				event.Data = dataBuilder.String()
 				return event, nil
 			}
 			continue
@@ -276,11 +294,11 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 			if !found {
 				data, _ = strings.CutPrefix(line, "data:")
 			}
+			// Use strings.Builder for O(n) concatenation instead of O(n²)
 			if hasData {
-				event.Data += "\n" + data
-			} else {
-				event.Data = data
+				dataBuilder.WriteByte('\n')
 			}
+			dataBuilder.WriteString(data)
 			hasData = true
 		} else if strings.HasPrefix(line, "event:") {
 			event.Type, _ = strings.CutPrefix(line, "event: ")
@@ -365,20 +383,25 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 
 	// Apply stream timeout if set and no context deadline exists.
 	// This prevents indefinite hangs when the server stops responding.
+	// The cancel function is stored in the Stream and called in Close().
+	var cancel context.CancelFunc
 	if c.streamTimeout > 0 {
 		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-			var cancel context.CancelFunc
 			ctx, cancel = context.WithTimeout(ctx, c.streamTimeout)
-			// Note: The cancel function will be called when the stream is closed
-			// or when the context times out. We don't defer cancel here because
-			// the stream may outlive this function call.
-			_ = cancel // Will be called when stream is closed or context times out
+		}
+	}
+
+	// Helper to call cancel on error paths to prevent context leak
+	cancelOnError := func() {
+		if cancel != nil {
+			cancel()
 		}
 	}
 
 	// Build URL with query parameters
 	u, err := url.Parse(c.baseURL)
 	if err != nil {
+		cancelOnError()
 		return nil, newError("INVALID_URL", "invalid base URL", 0, err)
 	}
 	// Preserve any base path in the URL (e.g., /api/v1)
@@ -400,6 +423,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	// Create HTTP request
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
 	if err != nil {
+		cancelOnError()
 		return nil, newError("REQUEST_FAILED", "failed to create request", 0, err)
 	}
 
@@ -432,6 +456,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 		c.responseHook(resp)
 	}
 	if err != nil {
+		cancelOnError()
 		return nil, c.handleError(err, "failed to connect to stream")
 	}
 
@@ -440,6 +465,7 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 		defer func() { _ = resp.Body.Close() }()
 		// Limit body read to prevent memory exhaustion from large error responses
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBodySize))
+		cancelOnError()
 		return nil, newError(
 			"STREAM_ERROR",
 			fmt.Sprintf("stream request failed: %s", string(body)),
@@ -448,10 +474,11 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 		)
 	}
 
-	// Verify content type
+	// Verify content type (case-insensitive per HTTP spec)
 	contentType := resp.Header.Get("Content-Type")
-	if !strings.HasPrefix(contentType, "text/event-stream") {
+	if !strings.HasPrefix(strings.ToLower(contentType), "text/event-stream") {
 		defer func() { _ = resp.Body.Close() }()
+		cancelOnError()
 		return nil, newError(
 			"INVALID_RESPONSE",
 			fmt.Sprintf("unexpected content type: %s", contentType),
@@ -463,5 +490,6 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	return &Stream{
 		resp:   resp,
 		reader: bufio.NewReader(resp.Body),
+		cancel: cancel,
 	}, nil
 }

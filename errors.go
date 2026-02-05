@@ -67,11 +67,15 @@ func (e *Error) Unwrap() error {
 
 // Is reports whether the target error matches this error.
 //
-// Two errors match if they have the same Code. This allows
-// using [errors.Is] with sentinel errors:
+// Two errors match if they have the same Code. The Status field is
+// NOT compared, so errors.Is(err, ErrNotFound) matches any NOT_FOUND
+// error regardless of the HTTP status code. This allows sentinel errors
+// to match all instances of that error type.
+//
+// Example:
 //
 //	if errors.Is(err, stromboli.ErrNotFound) {
-//	    // Handle not found
+//	    // Handles any NOT_FOUND error (404, or otherwise)
 //	}
 func (e *Error) Is(target error) bool {
 	t, ok := target.(*Error)
