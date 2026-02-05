@@ -1004,8 +1004,7 @@ paths:
           description: Unauthorized
           schema:
             $ref: '#/definitions/ErrorResponse'
-      security:
-      - BearerAuth: []
+      security: []
       summary: Generate JWT tokens
       tags:
       - auth
