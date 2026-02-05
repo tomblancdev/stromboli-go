@@ -246,6 +246,67 @@ type ClaudeOptions struct {
 	// FallbackModel is used when the primary model is overloaded.
 	// Example: "haiku"
 	FallbackModel string `json:"fallback_model,omitempty"`
+
+	// AddDirs specifies additional directories for tool access.
+	// Example: []string{"/home/user/shared", "/data"}
+	AddDirs []string `json:"add_dirs,omitempty"`
+
+	// Agents specifies custom agents definition (JSON object).
+	// Example: map[string]interface{}{"reviewer": ...}
+	Agents map[string]interface{} `json:"agents,omitempty"`
+
+	// AllowDangerouslySkipPermissions enables bypass as an option without enabling by default.
+	AllowDangerouslySkipPermissions bool `json:"allow_dangerously_skip_permissions,omitempty"`
+
+	// Betas specifies beta headers for API requests.
+	// Example: []string{"interleaved-thinking-2025-05-14"}
+	Betas []string `json:"betas,omitempty"`
+
+	// DisableSlashCommands disables all slash commands/skills.
+	DisableSlashCommands bool `json:"disable_slash_commands,omitempty"`
+
+	// Files specifies file resources in format: file_id:path.
+	// Example: []string{"abc123:/workspace/file.txt"}
+	Files []string `json:"files,omitempty"`
+
+	// ForkSession creates a new session ID when resuming.
+	ForkSession bool `json:"fork_session,omitempty"`
+
+	// IncludePartialMessages includes partial message chunks (stream-json only).
+	IncludePartialMessages bool `json:"include_partial_messages,omitempty"`
+
+	// InputFormat specifies the input format: text, stream-json.
+	// Example: "text"
+	InputFormat string `json:"input_format,omitempty"`
+
+	// McpConfigs specifies MCP server config files or JSON strings.
+	// Example: []string{"/path/to/mcp.json"}
+	McpConfigs []string `json:"mcp_configs,omitempty"`
+
+	// NoPersistence prevents saving session to disk.
+	NoPersistence bool `json:"no_persistence,omitempty"`
+
+	// PluginDirs specifies plugin directories.
+	// Example: []string{"/home/user/.claude/plugins"}
+	PluginDirs []string `json:"plugin_dirs,omitempty"`
+
+	// ReplayUserMessages re-emits user messages on stdout.
+	ReplayUserMessages bool `json:"replay_user_messages,omitempty"`
+
+	// SettingSources specifies setting sources to load: user, project, local.
+	// Example: []string{"user", "project"}
+	SettingSources []string `json:"setting_sources,omitempty"`
+
+	// Settings specifies path to settings JSON file or JSON string.
+	// Example: "/path/to/settings.json"
+	Settings string `json:"settings,omitempty"`
+
+	// StrictMcpConfig only uses MCP servers from mcp_configs.
+	StrictMcpConfig bool `json:"strict_mcp_config,omitempty"`
+
+	// Tools specifies built-in tools ("", "default", or specific names).
+	// Example: []string{"Bash", "Read", "Edit"}
+	Tools []string `json:"tools,omitempty"`
 }
 
 // PodmanOptions configures the container execution environment.

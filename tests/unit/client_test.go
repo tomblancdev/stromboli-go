@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,7 +210,7 @@ func TestNewClient_Options(t *testing.T) {
 	customHTTPClient := &http.Client{}
 
 	client, err := stromboli.NewClient("http://localhost:8585",
-		stromboli.WithTimeout(60),
+		stromboli.WithTimeout(60*time.Second),
 		stromboli.WithRetries(3),
 		stromboli.WithHTTPClient(customHTTPClient),
 		stromboli.WithUserAgent("test-agent/1.0"),

@@ -506,6 +506,25 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 		genReq.Claude.Continue = req.Claude.Continue
 		genReq.Claude.Agent = req.Claude.Agent
 		genReq.Claude.FallbackModel = req.Claude.FallbackModel
+
+		// New fields from API v0.4.0-alpha
+		genReq.Claude.AddDirs = req.Claude.AddDirs
+		genReq.Claude.Agents = req.Claude.Agents
+		genReq.Claude.AllowDangerouslySkipPermissions = req.Claude.AllowDangerouslySkipPermissions
+		genReq.Claude.Betas = req.Claude.Betas
+		genReq.Claude.DisableSlashCommands = req.Claude.DisableSlashCommands
+		genReq.Claude.Files = req.Claude.Files
+		genReq.Claude.ForkSession = req.Claude.ForkSession
+		genReq.Claude.IncludePartialMessages = req.Claude.IncludePartialMessages
+		genReq.Claude.InputFormat = req.Claude.InputFormat
+		genReq.Claude.McpConfigs = req.Claude.McpConfigs
+		genReq.Claude.NoPersistence = req.Claude.NoPersistence
+		genReq.Claude.PluginDirs = req.Claude.PluginDirs
+		genReq.Claude.ReplayUserMessages = req.Claude.ReplayUserMessages
+		genReq.Claude.SettingSources = req.Claude.SettingSources
+		genReq.Claude.Settings = req.Claude.Settings
+		genReq.Claude.StrictMcpConfig = req.Claude.StrictMcpConfig
+		genReq.Claude.Tools = req.Claude.Tools
 	}
 
 	// Convert Podman options
@@ -1015,6 +1034,8 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, message string) error 
 		return newError("FORBIDDEN", "access denied", status, apiErr)
 	case http.StatusNotFound:
 		return newError("NOT_FOUND", "resource not found", status, apiErr)
+	case http.StatusConflict:
+		return newError("CONFLICT", "resource already exists", status, apiErr)
 	case http.StatusRequestTimeout:
 		return newError("TIMEOUT", "request timed out", status, apiErr)
 	case http.StatusTooManyRequests:
@@ -1379,6 +1400,11 @@ func (c *Client) CreateSecret(ctx context.Context, req *CreateSecretRequest) err
 	// Execute request
 	resp, err := c.api.Secrets.PostSecrets(params)
 	if err != nil {
+		// Check for conflict (secret already exists)
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusConflict {
+			return ErrSecretExists
+		}
 		return c.handleError(err, "failed to create secret")
 	}
 
@@ -1433,6 +1459,11 @@ func (c *Client) GetSecret(ctx context.Context, name string) (*Secret, error) {
 	// Execute request
 	resp, err := c.api.Secrets.GetSecretsName(params)
 	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
 		return nil, c.handleError(err, "failed to get secret")
 	}
 
@@ -1482,6 +1513,11 @@ func (c *Client) DeleteSecret(ctx context.Context, name string) error {
 	// Execute request
 	_, err := c.api.Secrets.DeleteSecretsName(params)
 	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return ErrNotFound
+		}
 		return c.handleError(err, "failed to delete secret")
 	}
 
@@ -1574,6 +1610,11 @@ func (c *Client) GetImage(ctx context.Context, name string) (*Image, error) {
 	// Execute request
 	resp, err := c.api.Images.GetImagesName(params)
 	if err != nil {
+		// Check for not found
+		var apiErr *runtime.APIError
+		if errors.As(err, &apiErr) && apiErr.Code == http.StatusNotFound {
+			return nil, ErrImageNotFound
+		}
 		return nil, c.handleError(err, "failed to get image")
 	}
 
