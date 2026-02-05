@@ -225,7 +225,13 @@ func WithUserAgent(userAgent string) Option {
 //	validation, err := client.ValidateToken(ctx)
 func WithToken(token string) Option {
 	return func(c *Client) {
-		c.token = token // Empty string is valid (clears token)
+		// Validate token to prevent HTTP header injection via CR/LF characters.
+		// Empty string is valid (clears token), but non-empty tokens must be safe.
+		if token != "" && !isValidToken(token) {
+			getLogger().Printf("stromboli: WARNING: WithToken called with invalid token (contains control characters), ignoring")
+			return
+		}
+		c.token = token
 	}
 }
 

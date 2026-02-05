@@ -80,9 +80,28 @@ type Stream struct {
 	resp    *http.Response
 	reader  *bufio.Reader
 	current *StreamEvent
-	err     error
+	errMu   sync.RWMutex // protects err field for concurrent access
+	err     error        // use setErr/getErr for thread-safe access
 	closed  atomic.Bool
 	cancel  context.CancelFunc // context cancel function for stream timeout
+}
+
+// setErr sets the error if not already set (thread-safe).
+// If an error is already present, the new error is ignored to preserve
+// the original error that caused the failure.
+func (s *Stream) setErr(err error) {
+	s.errMu.Lock()
+	defer s.errMu.Unlock()
+	if s.err == nil {
+		s.err = err
+	}
+}
+
+// getErr returns the current error (thread-safe).
+func (s *Stream) getErr() error {
+	s.errMu.RLock()
+	defer s.errMu.RUnlock()
+	return s.err
 }
 
 // Next advances to the next event in the stream.
@@ -97,14 +116,14 @@ type Stream struct {
 //	    fmt.Print(event.Data)
 //	}
 func (s *Stream) Next() bool {
-	if s.closed.Load() || s.err != nil {
+	if s.closed.Load() || s.getErr() != nil {
 		return false
 	}
 
 	event, err := s.readEvent()
 	if err != nil {
 		if err != io.EOF {
-			s.err = err
+			s.setErr(err)
 		}
 		return false
 	}
@@ -131,7 +150,7 @@ func (s *Stream) Event() *StreamEvent {
 // check if [Stream.Next] returned false. After Next returns false,
 // Err() == nil means normal completion; Err() != nil means an error.
 func (s *Stream) Err() error {
-	return s.err
+	return s.getErr()
 }
 
 // Close closes the stream and releases resources.
@@ -202,9 +221,7 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 			close(done) // Signal watcher to exit
 			if r := recover(); r != nil {
 				// Only set error if not already set (preserve original error)
-				if s.err == nil {
-					s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
-				}
+				s.setErr(fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack()))
 			}
 			// Cleanup with defensive panic recovery to prevent double-panic
 			func() {
@@ -226,9 +243,7 @@ func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 			case <-ctx.Done():
 				// Set error before cleanup so consumer knows cancellation occurred.
 				// Only set if no other error exists (preserve original error).
-				if s.err == nil {
-					s.err = ctx.Err()
-				}
+				s.setErr(ctx.Err())
 				cleanup() // Unblocks the reader
 			case <-done:
 				// Reader completed normally, no need to cleanup

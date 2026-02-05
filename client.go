@@ -1259,6 +1259,12 @@ func (c *Client) getToken() string {
 //	// Now authenticated endpoints will work
 //	validation, _ := client.ValidateToken(ctx)
 func (c *Client) SetToken(token string) {
+	// Validate token to prevent HTTP header injection via CR/LF characters.
+	// Empty string is valid (clears token), but non-empty tokens must be safe.
+	if token != "" && !isValidToken(token) {
+		getLogger().Printf("stromboli: WARNING: SetToken called with invalid token (contains control characters), ignoring")
+		return
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = token
@@ -2028,4 +2034,16 @@ func validateJSONSchema(schema string) error {
 	}
 
 	return fmt.Errorf("schema must contain at least one JSON Schema keyword (type, properties, items, etc.)")
+}
+
+// isValidTokenChar returns true if the token contains only valid HTTP header characters.
+// This prevents HTTP header injection attacks via malicious tokens containing CR/LF.
+func isValidToken(token string) bool {
+	for _, c := range token {
+		// Reject CR, LF, and other control characters that could enable header injection
+		if c == '\r' || c == '\n' || c < 0x20 || c == 0x7f {
+			return false
+		}
+	}
+	return true
 }
