@@ -293,6 +293,82 @@ type PodmanOptions struct {
 	// The secret must exist (created via `podman secret create`).
 	// Example: map[string]string{"GH_TOKEN": "github-token"}
 	SecretsEnv map[string]string `json:"secrets_env,omitempty"`
+
+	// Lifecycle configures commands to run at specific container lifecycle stages.
+	// See [LifecycleHooks] for available hooks.
+	Lifecycle *LifecycleHooks `json:"lifecycle,omitempty"`
+
+	// Environment specifies a compose-based multi-service environment.
+	// When set, the agent runs inside the specified service of the compose stack.
+	// See [EnvironmentConfig] for configuration options.
+	Environment *EnvironmentConfig `json:"environment,omitempty"`
+}
+
+// LifecycleHooks configures commands to run at specific container lifecycle stages.
+//
+// Use these hooks to set up the container environment before Claude starts,
+// such as installing dependencies, starting background services, etc.
+//
+// Example:
+//
+//	&stromboli.LifecycleHooks{
+//	    OnCreateCommand: []string{"pip install -r requirements.txt"},
+//	    PostStart:       []string{"redis-server --daemonize yes"},
+//	    HooksTimeout:    "5m",
+//	}
+type LifecycleHooks struct {
+	// OnCreateCommand runs after container creation, before Claude starts (first run only).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"pip install -r requirements.txt"}
+	OnCreateCommand []string `json:"on_create_command,omitempty"`
+
+	// PostCreate runs after OnCreateCommand completes (first run only).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"npm run setup"}
+	PostCreate []string `json:"post_create,omitempty"`
+
+	// PostStart runs after container starts (every run, including continues).
+	// Commands are executed sequentially via "podman exec".
+	// Example: []string{"redis-server --daemonize yes"}
+	PostStart []string `json:"post_start,omitempty"`
+
+	// HooksTimeout is the maximum duration for all hooks combined.
+	// If not specified, hooks run with the container's timeout.
+	// Examples: "5m", "30s"
+	HooksTimeout string `json:"hooks_timeout,omitempty"`
+}
+
+// EnvironmentConfig specifies a compose-based multi-service environment.
+//
+// When set, the agent runs inside the specified service of a Docker Compose
+// stack instead of a standalone container. This allows running Claude
+// in complex multi-container environments.
+//
+// Example:
+//
+//	&stromboli.EnvironmentConfig{
+//	    Type:    "compose",
+//	    Path:    "/home/user/project/docker-compose.yml",
+//	    Service: "dev",
+//	}
+type EnvironmentConfig struct {
+	// Type of environment: "" (default single container) or "compose".
+	// Example: "compose"
+	Type string `json:"type,omitempty"`
+
+	// Path to compose file (required when Type="compose").
+	// Must be an absolute path ending in .yml or .yaml.
+	// Example: "/home/user/project/docker-compose.yml"
+	Path string `json:"path,omitempty"`
+
+	// Service name where Claude will run (required when Type="compose").
+	// Example: "dev"
+	Service string `json:"service,omitempty"`
+
+	// BuildTimeout is the optional build timeout override for compose.
+	// If not specified, uses server default (10m).
+	// Examples: "15m", "30m"
+	BuildTimeout string `json:"build_timeout,omitempty"`
 }
 
 // RunResponse represents the result of a synchronous Claude execution.
@@ -452,6 +528,13 @@ type CrashInfo struct {
 	// PartialOutput contains any output captured before the crash.
 	// This can help debug what the job was doing when it crashed.
 	PartialOutput string `json:"partial_output,omitempty"`
+
+	// Signal is the signal that killed the process (if applicable).
+	// Examples: "SIGSEGV", "SIGKILL", "SIGTERM"
+	Signal string `json:"signal,omitempty"`
+
+	// TaskCompleted indicates whether the task appeared to complete before crashing.
+	TaskCompleted bool `json:"task_completed,omitempty"`
 }
 
 // ----------------------------------------------------------------------------
@@ -547,6 +630,200 @@ type Message struct {
 
 	// ToolResult contains tool use results (for tool_result messages).
 	ToolResult interface{} `json:"tool_result,omitempty"`
+}
+
+// ----------------------------------------------------------------------------
+// Secrets Types
+// ----------------------------------------------------------------------------
+
+// Secret represents a Podman secret's metadata.
+//
+// Secrets are used to securely pass sensitive data (API keys, tokens, etc.)
+// to containers without exposing them in environment variables or command lines.
+//
+// Use [Client.CreateSecret] to create a new secret:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+type Secret struct {
+	// ID is the unique identifier of the secret.
+	// Example: "abc123def456"
+	ID string `json:"id,omitempty"`
+
+	// Name is the secret name used to reference it.
+	// Example: "github-token"
+	Name string `json:"name"`
+
+	// CreatedAt is when the secret was created (RFC3339 format).
+	// Example: "2024-01-15T10:30:00Z"
+	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// CreateSecretRequest represents a request to create a new Podman secret.
+//
+// Use with [Client.CreateSecret]:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+type CreateSecretRequest struct {
+	// Name is the secret name (required).
+	// Must be unique among existing secrets.
+	// Example: "github-token"
+	Name string `json:"name"`
+
+	// Value is the secret data (required).
+	// This value is stored securely and never returned by the API.
+	// Example: "ghp_xxxx..."
+	Value string `json:"value"`
+}
+
+// ----------------------------------------------------------------------------
+// Images Types
+// ----------------------------------------------------------------------------
+
+// Image represents a local container image with compatibility information.
+//
+// Use [Client.ListImages] to list all available images:
+//
+//	images, err := client.ListImages(ctx)
+//	for _, img := range images {
+//	    fmt.Printf("%s:%s (rank %d)\n", img.Repository, img.Tag, img.CompatibilityRank)
+//	}
+type Image struct {
+	// ID is the image ID (usually sha256:...).
+	// Example: "sha256:abc123def456"
+	ID string `json:"id,omitempty"`
+
+	// Repository is the image repository name.
+	// Example: "python"
+	Repository string `json:"repository,omitempty"`
+
+	// Tag is the image tag.
+	// Example: "3.12-slim"
+	Tag string `json:"tag,omitempty"`
+
+	// Size is the image size in bytes.
+	// Example: 125000000
+	Size int64 `json:"size,omitempty"`
+
+	// Created is when the image was created (RFC3339 format).
+	// Example: "2024-01-15T10:30:00Z"
+	Created string `json:"created,omitempty"`
+
+	// Description is a human-readable description of the image.
+	// Example: "Python development image"
+	Description string `json:"description,omitempty"`
+
+	// Compatible indicates if the image is compatible with Stromboli.
+	// Images with glibc are compatible; Alpine/musl images are not.
+	Compatible bool `json:"compatible,omitempty"`
+
+	// CompatibilityRank indicates the image's compatibility level.
+	// 1-2: Verified compatible, 3: Standard glibc, 4: Incompatible (Alpine/musl)
+	CompatibilityRank int64 `json:"compatibility_rank,omitempty"`
+
+	// HasClaudeCLI indicates if the image has Claude CLI pre-installed.
+	HasClaudeCLI bool `json:"has_claude_cli,omitempty"`
+
+	// Tools lists tools available in the image.
+	// Example: []string{"python", "pip", "git"}
+	Tools []string `json:"tools,omitempty"`
+}
+
+// ImageSearchResult represents a search result from a container registry.
+//
+// Use [Client.SearchImages] to search registries:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query: "python",
+//	    Limit: 10,
+//	})
+//	for _, r := range results {
+//	    fmt.Printf("%s: %s (stars: %d)\n", r.Name, r.Description, r.Stars)
+//	}
+type ImageSearchResult struct {
+	// Name is the image name.
+	// Example: "python"
+	Name string `json:"name,omitempty"`
+
+	// Description is the image description from the registry.
+	// Example: "Python is an interpreted programming language"
+	Description string `json:"description,omitempty"`
+
+	// Stars is the number of stars on the registry.
+	// Example: 8500
+	Stars int64 `json:"stars,omitempty"`
+
+	// Official indicates if this is an official image.
+	Official bool `json:"official,omitempty"`
+
+	// Automated indicates if this image is automatically built.
+	Automated bool `json:"automated,omitempty"`
+
+	// Index is the registry index (e.g., "docker.io").
+	// Example: "docker.io"
+	Index string `json:"index,omitempty"`
+}
+
+// SearchImagesOptions configures an image search request.
+//
+// Example:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query:   "python",
+//	    Limit:   25,
+//	    NoTrunc: true,
+//	})
+type SearchImagesOptions struct {
+	// Query is the search term (required).
+	// Example: "python"
+	Query string
+
+	// Limit is the maximum number of results to return.
+	// Default varies by registry.
+	Limit int64
+
+	// NoTrunc disables truncation of output.
+	NoTrunc bool
+}
+
+// PullImageRequest represents a request to pull a container image.
+//
+// Use with [Client.PullImage]:
+//
+//	result, err := client.PullImage(ctx, &stromboli.PullImageRequest{
+//	    Image:    "python:3.12-slim",
+//	    Platform: "linux/amd64",
+//	})
+type PullImageRequest struct {
+	// Image is the image reference to pull (required).
+	// Example: "python:3.12-slim"
+	Image string `json:"image"`
+
+	// Platform specifies the platform for multi-arch images.
+	// Example: "linux/amd64", "linux/arm64"
+	Platform string `json:"platform,omitempty"`
+
+	// Quiet suppresses pull progress output.
+	Quiet bool `json:"quiet,omitempty"`
+}
+
+// PullImageResponse represents the result of an image pull operation.
+type PullImageResponse struct {
+	// Success indicates if the pull was successful.
+	Success bool `json:"success,omitempty"`
+
+	// Image is the pulled image reference.
+	// Example: "python:3.12-slim"
+	Image string `json:"image,omitempty"`
+
+	// ImageID is the pulled image's ID.
+	// Example: "sha256:abc123def456"
+	ImageID string `json:"image_id,omitempty"`
 }
 
 // ----------------------------------------------------------------------------

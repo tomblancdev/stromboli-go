@@ -8,6 +8,7 @@ package models
 import (
 	"context"
 
+	"github.com/go-openapi/errors"
 	"github.com/go-openapi/strfmt"
 	"github.com/go-openapi/swag"
 )
@@ -25,9 +26,17 @@ type StromboliInternalTypesPodmanOptions struct {
 	// Example: 1
 	Cpus string `json:"cpus,omitempty"`
 
+	// Environment specifies a compose-based multi-service environment.
+	// When set, the agent runs inside the specified service of the compose stack
+	// instead of a standalone container.
+	Environment StromboliInternalTypesEnvironmentConfig `json:"environment,omitempty"`
+
 	// Container image override (must match allowed patterns)
 	// Example: python:3.12
 	Image string `json:"image,omitempty"`
+
+	// Lifecycle hooks for running commands at specific container events
+	Lifecycle StromboliInternalTypesLifecycleHooks `json:"lifecycle,omitempty"`
 
 	// Memory limit (e.g., "512m", "1g")
 	// Example: 512m
@@ -49,11 +58,63 @@ type StromboliInternalTypesPodmanOptions struct {
 
 // Validate validates this stromboli internal types podman options
 func (m *StromboliInternalTypesPodmanOptions) Validate(formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.validateEnvironment(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateLifecycle(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
 	return nil
 }
 
-// ContextValidate validates this stromboli internal types podman options based on context it is used
+func (m *StromboliInternalTypesPodmanOptions) validateEnvironment(formats strfmt.Registry) error {
+	if swag.IsZero(m.Environment) { // not required
+		return nil
+	}
+
+	return nil
+}
+
+func (m *StromboliInternalTypesPodmanOptions) validateLifecycle(formats strfmt.Registry) error {
+	if swag.IsZero(m.Lifecycle) { // not required
+		return nil
+	}
+
+	return nil
+}
+
+// ContextValidate validate this stromboli internal types podman options based on the context it is used
 func (m *StromboliInternalTypesPodmanOptions) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
+	var res []error
+
+	if err := m.contextValidateEnvironment(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateLifecycle(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if len(res) > 0 {
+		return errors.CompositeValidationError(res...)
+	}
+	return nil
+}
+
+func (m *StromboliInternalTypesPodmanOptions) contextValidateEnvironment(ctx context.Context, formats strfmt.Registry) error {
+
+	return nil
+}
+
+func (m *StromboliInternalTypesPodmanOptions) contextValidateLifecycle(ctx context.Context, formats strfmt.Registry) error {
+
 	return nil
 }
 

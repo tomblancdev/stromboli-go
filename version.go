@@ -13,14 +13,14 @@ import (
 //   - MAJOR: Breaking changes to the public API
 //   - MINOR: New features, backwards compatible
 //   - PATCH: Bug fixes, backwards compatible
-const Version = "0.2.1-alpha"
+const Version = "0.3.0-alpha"
 
 // APIVersion is the target Stromboli API version this SDK was built for.
 //
 // The SDK is tested against this API version and may not work correctly
 // with significantly different API versions. Use [Client.Health] to check
 // the actual server version at runtime.
-const APIVersion = "0.3.0-alpha"
+const APIVersion = "0.4.0-alpha"
 
 // APIVersionRange defines the range of Stromboli API versions this SDK
 // is compatible with, using semver constraint syntax.
@@ -31,7 +31,7 @@ const APIVersion = "0.3.0-alpha"
 //   - "~1.2.3" — versions >=1.2.3 and <1.3.0
 //
 // Use [IsCompatible] or [CheckCompatibility] to verify a server version.
-const APIVersionRange = ">=0.3.0-alpha <0.4.0"
+const APIVersionRange = ">=0.4.0-alpha <0.5.0"
 
 // CompatibilityStatus represents the result of a version compatibility check.
 type CompatibilityStatus int

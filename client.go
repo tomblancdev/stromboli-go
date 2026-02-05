@@ -16,6 +16,7 @@ import (
 	generatedclient "github.com/tomblancdev/stromboli-go/generated/client"
 	"github.com/tomblancdev/stromboli-go/generated/client/auth"
 	"github.com/tomblancdev/stromboli-go/generated/client/execution"
+	"github.com/tomblancdev/stromboli-go/generated/client/images"
 	"github.com/tomblancdev/stromboli-go/generated/client/jobs"
 	"github.com/tomblancdev/stromboli-go/generated/client/secrets"
 	"github.com/tomblancdev/stromboli-go/generated/client/sessions"
@@ -516,6 +517,22 @@ func (c *Client) toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 		genReq.Podman.Volumes = req.Podman.Volumes
 		genReq.Podman.Image = req.Podman.Image
 		genReq.Podman.SecretsEnv = req.Podman.SecretsEnv
+
+		// Convert lifecycle hooks
+		if req.Podman.Lifecycle != nil {
+			genReq.Podman.Lifecycle.OnCreateCommand = req.Podman.Lifecycle.OnCreateCommand
+			genReq.Podman.Lifecycle.PostCreate = req.Podman.Lifecycle.PostCreate
+			genReq.Podman.Lifecycle.PostStart = req.Podman.Lifecycle.PostStart
+			genReq.Podman.Lifecycle.HooksTimeout = req.Podman.Lifecycle.HooksTimeout
+		}
+
+		// Convert environment config
+		if req.Podman.Environment != nil {
+			genReq.Podman.Environment.Type = req.Podman.Environment.Type
+			genReq.Podman.Environment.Path = req.Podman.Environment.Path
+			genReq.Podman.Environment.Service = req.Podman.Environment.Service
+			genReq.Podman.Environment.BuildTimeout = req.Podman.Environment.BuildTimeout
+		}
 	}
 
 	return genReq
@@ -703,6 +720,8 @@ func (c *Client) fromGeneratedJobResponse(j *models.JobResponse) *Job {
 			Reason:        j.CrashInfo.Reason,
 			ExitCode:      j.CrashInfo.ExitCode,
 			PartialOutput: j.CrashInfo.PartialOutput,
+			Signal:        j.CrashInfo.Signal,
+			TaskCompleted: j.CrashInfo.TaskCompleted,
 		}
 	}
 
@@ -1262,8 +1281,8 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 //	    log.Fatal(err)
 //	}
 //
-//	for _, name := range secrets {
-//	    fmt.Printf("Available secret: %s\n", name)
+//	for _, s := range secrets {
+//	    fmt.Printf("Secret: %s (created: %s)\n", s.Name, s.CreatedAt)
 //	}
 //
 // Using secrets in execution:
@@ -1274,11 +1293,11 @@ func (c *Client) Logout(ctx context.Context) (*LogoutResponse, error) {
 //	    Prompt: "Use my GitHub token to list repos",
 //	    Podman: &stromboli.PodmanOptions{
 //	        SecretsEnv: map[string]string{
-//	            "GITHUB_TOKEN": secrets[0], // Use first available secret
+//	            "GITHUB_TOKEN": secrets[0].Name, // Use first available secret
 //	        },
 //	    },
 //	})
-func (c *Client) ListSecrets(ctx context.Context) ([]string, error) {
+func (c *Client) ListSecrets(ctx context.Context) ([]*Secret, error) {
 	// Create request parameters
 	params := secrets.NewGetSecretsParams()
 	params.SetContext(ctx)
@@ -1301,5 +1320,422 @@ func (c *Client) ListSecrets(ctx context.Context) ([]string, error) {
 		return nil, newError("SECRETS_ERROR", payload.Error, 500, nil)
 	}
 
-	return payload.Secrets, nil
+	// Map secrets
+	result := make([]*Secret, 0, len(payload.Secrets))
+	for _, s := range payload.Secrets {
+		if s != nil {
+			result = append(result, &Secret{
+				ID:        s.ID,
+				Name:      s.Name,
+				CreatedAt: s.CreatedAt,
+			})
+		}
+	}
+
+	return result, nil
+}
+
+// CreateSecret creates a new Podman secret.
+//
+// Secrets can be used to securely pass sensitive data (API keys, tokens, etc.)
+// to containers without exposing them in environment variables or command lines.
+//
+// Example:
+//
+//	err := client.CreateSecret(ctx, &stromboli.CreateSecretRequest{
+//	    Name:  "github-token",
+//	    Value: "ghp_xxxx...",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+// Returns [ErrSecretExists] if a secret with this name already exists:
+//
+//	err := client.CreateSecret(ctx, req)
+//	if errors.Is(err, stromboli.ErrSecretExists) {
+//	    fmt.Println("Secret already exists")
+//	}
+func (c *Client) CreateSecret(ctx context.Context, req *CreateSecretRequest) error {
+	if req == nil {
+		return newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Name == "" {
+		return newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+	if req.Value == "" {
+		return newError("BAD_REQUEST", "secret value is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewPostSecretsParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetRequest(&models.CreateSecretRequest{
+		Name:  &req.Name,
+		Value: &req.Value,
+	})
+
+	// Execute request
+	resp, err := c.api.Secrets.PostSecrets(params)
+	if err != nil {
+		return c.handleError(err, "failed to create secret")
+	}
+
+	// Check response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return newError("INVALID_RESPONSE", "empty secret response", 0, nil)
+	}
+
+	// Check for error in response
+	if payload.Error != "" {
+		return newError("SECRET_CREATE_ERROR", payload.Error, 500, nil)
+	}
+
+	if !payload.Success {
+		return newError("SECRET_CREATE_FAILED", "failed to create secret", 500, nil)
+	}
+
+	return nil
+}
+
+// GetSecret retrieves metadata for a specific secret.
+//
+// For security, the actual secret value is never returned - only the ID,
+// name, and creation time.
+//
+// Example:
+//
+//	secret, err := client.GetSecret(ctx, "github-token")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Printf("Secret %s created at %s\n", secret.Name, secret.CreatedAt)
+//
+// Returns [ErrNotFound] if the secret doesn't exist:
+//
+//	secret, err := client.GetSecret(ctx, "unknown-secret")
+//	if errors.Is(err, stromboli.ErrNotFound) {
+//	    fmt.Println("Secret not found")
+//	}
+func (c *Client) GetSecret(ctx context.Context, name string) (*Secret, error) {
+	if name == "" {
+		return nil, newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewGetSecretsNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetName(name)
+
+	// Execute request
+	resp, err := c.api.Secrets.GetSecretsName(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to get secret")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty secret response", 0, nil)
+	}
+
+	return &Secret{
+		ID:        payload.ID,
+		Name:      payload.Name,
+		CreatedAt: payload.CreatedAt,
+	}, nil
+}
+
+// DeleteSecret permanently deletes a Podman secret.
+//
+// WARNING: This action cannot be undone. Secrets currently in use by
+// running containers may cause those containers to fail.
+//
+// Example:
+//
+//	err := client.DeleteSecret(ctx, "github-token")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//	fmt.Println("Secret deleted")
+//
+// Returns [ErrNotFound] if the secret doesn't exist:
+//
+//	err := client.DeleteSecret(ctx, "unknown-secret")
+//	if errors.Is(err, stromboli.ErrNotFound) {
+//	    fmt.Println("Secret not found")
+//	}
+func (c *Client) DeleteSecret(ctx context.Context, name string) error {
+	if name == "" {
+		return newError("BAD_REQUEST", "secret name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := secrets.NewDeleteSecretsNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetName(name)
+
+	// Execute request
+	_, err := c.api.Secrets.DeleteSecretsName(params)
+	if err != nil {
+		return c.handleError(err, "failed to delete secret")
+	}
+
+	return nil
+}
+
+// ----------------------------------------------------------------------------
+// Images Methods
+// ----------------------------------------------------------------------------
+
+// ListImages returns all local container images sorted by compatibility rank.
+//
+// Images are ranked by their compatibility with Stromboli:
+//   - Rank 1-2: Verified compatible (have required tools)
+//   - Rank 3: Standard glibc (compatible)
+//   - Rank 4: Incompatible (Alpine/musl)
+//
+// Example:
+//
+//	images, err := client.ListImages(ctx)
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, img := range images {
+//	    fmt.Printf("%s:%s (rank %d, compatible: %v)\n",
+//	        img.Repository, img.Tag, img.CompatibilityRank, img.Compatible)
+//	}
+func (c *Client) ListImages(ctx context.Context) ([]*Image, error) {
+	// Create request parameters
+	params := images.NewGetImagesParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	// Execute request
+	resp, err := c.api.Images.GetImages(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to list images")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty images response", 0, nil)
+	}
+
+	// Map images
+	result := make([]*Image, 0, len(payload.Images))
+	for _, img := range payload.Images {
+		if img != nil {
+			result = append(result, c.fromGeneratedImage(img))
+		}
+	}
+
+	return result, nil
+}
+
+// GetImage returns detailed information about a specific container image.
+//
+// This includes all labels, compatibility information, and available tools.
+//
+// Example:
+//
+//	image, err := client.GetImage(ctx, "python:3.12-slim")
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	fmt.Printf("Image: %s\n", image.ID)
+//	fmt.Printf("Compatible: %v\n", image.Compatible)
+//	fmt.Printf("Tools: %v\n", image.Tools)
+//
+// Returns [ErrImageNotFound] if the image doesn't exist locally:
+//
+//	image, err := client.GetImage(ctx, "nonexistent:latest")
+//	if errors.Is(err, stromboli.ErrImageNotFound) {
+//	    fmt.Println("Image not found")
+//	}
+func (c *Client) GetImage(ctx context.Context, name string) (*Image, error) {
+	if name == "" {
+		return nil, newError("BAD_REQUEST", "image name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewGetImagesNameParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetName(name)
+
+	// Execute request
+	resp, err := c.api.Images.GetImagesName(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to get image")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty image response", 0, nil)
+	}
+
+	return c.fromGeneratedImageDetail(payload), nil
+}
+
+// SearchImages searches container registries for images matching the query.
+//
+// Returns results from Docker Hub and other configured registries.
+//
+// Example:
+//
+//	results, err := client.SearchImages(ctx, &stromboli.SearchImagesOptions{
+//	    Query: "python",
+//	    Limit: 10,
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	for _, r := range results {
+//	    fmt.Printf("%s: %s (stars: %d, official: %v)\n",
+//	        r.Name, r.Description, r.Stars, r.Official)
+//	}
+func (c *Client) SearchImages(ctx context.Context, opts *SearchImagesOptions) ([]*ImageSearchResult, error) {
+	if opts == nil || opts.Query == "" {
+		return nil, newError("BAD_REQUEST", "search query is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewGetImagesSearchParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+	params.SetQ(opts.Query)
+
+	if opts.Limit > 0 {
+		params.SetLimit(&opts.Limit)
+	}
+	if opts.NoTrunc {
+		params.SetNoTrunc(&opts.NoTrunc)
+	}
+
+	// Execute request
+	resp, err := c.api.Images.GetImagesSearch(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to search images")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty search response", 0, nil)
+	}
+
+	// Map results
+	results := make([]*ImageSearchResult, 0, len(payload.Results))
+	for _, r := range payload.Results {
+		if r != nil {
+			results = append(results, &ImageSearchResult{
+				Name:        r.Name,
+				Description: r.Description,
+				Stars:       r.Stars,
+				Official:    r.Official,
+				Automated:   r.Automated,
+				Index:       r.Index,
+			})
+		}
+	}
+
+	return results, nil
+}
+
+// PullImage pulls a container image from a registry.
+//
+// This operation may take some time for large images.
+//
+// Example:
+//
+//	result, err := client.PullImage(ctx, &stromboli.PullImageRequest{
+//	    Image:    "python:3.12-slim",
+//	    Platform: "linux/amd64",
+//	})
+//	if err != nil {
+//	    log.Fatal(err)
+//	}
+//
+//	if result.Success {
+//	    fmt.Printf("Pulled image %s (ID: %s)\n", result.Image, result.ImageID)
+//	}
+func (c *Client) PullImage(ctx context.Context, req *PullImageRequest) (*PullImageResponse, error) {
+	if req == nil {
+		return nil, newError("BAD_REQUEST", "request is required", 400, nil)
+	}
+	if req.Image == "" {
+		return nil, newError("BAD_REQUEST", "image name is required", 400, nil)
+	}
+
+	// Create request parameters
+	params := images.NewPostImagesPullParams()
+	params.SetContext(ctx)
+	params.SetTimeout(c.timeout)
+
+	image := req.Image
+	params.SetRequest(&models.ImagePullRequest{
+		Image:    &image,
+		Platform: req.Platform,
+		Quiet:    req.Quiet,
+	})
+
+	// Execute request
+	resp, err := c.api.Images.PostImagesPull(params)
+	if err != nil {
+		return nil, c.handleError(err, "failed to pull image")
+	}
+
+	// Convert response
+	payload := resp.GetPayload()
+	if payload == nil {
+		return nil, newError("INVALID_RESPONSE", "empty pull response", 0, nil)
+	}
+
+	return &PullImageResponse{
+		Success: payload.Success,
+		Image:   payload.Image,
+		ImageID: payload.ImageID,
+	}, nil
+}
+
+// fromGeneratedImage converts a generated ImageInfoResponse to our Image type.
+func (c *Client) fromGeneratedImage(img *models.ImageInfoResponse) *Image {
+	return &Image{
+		ID:                img.ID,
+		Repository:        img.Repository,
+		Tag:               img.Tag,
+		Size:              img.Size,
+		Created:           img.Created,
+		Description:       img.Description,
+		Compatible:        img.Compatible,
+		CompatibilityRank: img.CompatibilityRank,
+		HasClaudeCLI:      img.HasClaudeCli,
+		Tools:             img.Tools,
+	}
+}
+
+// fromGeneratedImageDetail converts a generated ImageDetailResponse to our Image type.
+func (c *Client) fromGeneratedImageDetail(img *models.ImageDetailResponse) *Image {
+	return &Image{
+		ID:                img.ID,
+		Repository:        img.Repository,
+		Tag:               img.Tag,
+		Size:              img.Size,
+		Created:           img.Created,
+		Description:       img.Description,
+		Compatible:        img.Compatible,
+		CompatibilityRank: img.CompatibilityRank,
+		HasClaudeCLI:      img.HasClaudeCli,
+		Tools:             img.Tools,
+	}
 }

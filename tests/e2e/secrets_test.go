@@ -23,9 +23,9 @@ func TestListSecrets_E2E(t *testing.T) {
 
 	// Log for debugging
 	t.Logf("Found %d secrets", len(secrets))
-	for i, name := range secrets {
+	for i, s := range secrets {
 		if i < 5 { // Only log first 5
-			t.Logf("  - %s", name)
+			t.Logf("  - %s (id: %s)", s.Name, s.ID)
 		}
 	}
 	if len(secrets) > 5 {

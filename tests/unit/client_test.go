@@ -49,7 +49,7 @@ func TestHealth_Success(t *testing.T) {
 		resp := map[string]interface{}{
 			"name":    "stromboli",
 			"status":  "ok",
-			"version": "0.3.0-alpha",
+			"version": "0.4.0-alpha",
 			"components": []map[string]interface{}{
 				{"name": "podman", "status": "ok", "error": ""},
 			},
@@ -68,7 +68,7 @@ func TestHealth_Success(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "stromboli", health.Name)
 	assert.Equal(t, "ok", health.Status)
-	assert.Equal(t, "0.3.0-alpha", health.Version)
+	assert.Equal(t, "0.4.0-alpha", health.Version)
 	assert.True(t, health.IsHealthy())
 	assert.Len(t, health.Components, 1)
 	assert.Equal(t, "podman", health.Components[0].Name)
@@ -82,7 +82,7 @@ func TestHealth_Unhealthy(t *testing.T) {
 		resp := map[string]interface{}{
 			"name":    "stromboli",
 			"status":  "error",
-			"version": "0.3.0-alpha",
+			"version": "0.4.0-alpha",
 			"components": []map[string]interface{}{
 				{"name": "podman", "status": "error", "error": "podman not found"},
 			},
@@ -1682,9 +1682,13 @@ func TestListSecrets_Success(t *testing.T) {
 		assert.Equal(t, "/secrets", r.URL.Path)
 		assert.Equal(t, http.MethodGet, r.Method)
 
-		// Return mock response
+		// Return mock response with full secret objects
 		resp := map[string]interface{}{
-			"secrets": []string{"github-token", "gitlab-token", "npm-token"},
+			"secrets": []map[string]interface{}{
+				{"id": "abc123", "name": "github-token", "created_at": "2024-01-15T10:30:00Z"},
+				{"id": "def456", "name": "gitlab-token", "created_at": "2024-01-15T10:31:00Z"},
+				{"id": "ghi789", "name": "npm-token", "created_at": "2024-01-15T10:32:00Z"},
+			},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		mustEncode(w, resp)
@@ -1699,9 +1703,10 @@ func TestListSecrets_Success(t *testing.T) {
 	// Assert
 	require.NoError(t, err)
 	assert.Len(t, secrets, 3)
-	assert.Contains(t, secrets, "github-token")
-	assert.Contains(t, secrets, "gitlab-token")
-	assert.Contains(t, secrets, "npm-token")
+	assert.Equal(t, "github-token", secrets[0].Name)
+	assert.Equal(t, "abc123", secrets[0].ID)
+	assert.Equal(t, "gitlab-token", secrets[1].Name)
+	assert.Equal(t, "npm-token", secrets[2].Name)
 }
 
 // TestListSecrets_Empty tests ListSecrets when no secrets exist.
@@ -1709,7 +1714,7 @@ func TestListSecrets_Empty(t *testing.T) {
 	// Arrange
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
-			"secrets": []string{},
+			"secrets": []map[string]interface{}{},
 		}
 		w.Header().Set("Content-Type", "application/json")
 		mustEncode(w, resp)
@@ -1731,7 +1736,7 @@ func TestListSecrets_Error(t *testing.T) {
 	// Arrange
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := map[string]interface{}{
-			"secrets": []string{},
+			"secrets": []map[string]interface{}{},
 			"error":   "podman not available",
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -1752,6 +1757,498 @@ func TestListSecrets_Error(t *testing.T) {
 	require.ErrorAs(t, err, &apiErr)
 	assert.Equal(t, "SECRETS_ERROR", apiErr.Code)
 	assert.Contains(t, apiErr.Message, "podman not available")
+}
+
+// TestCreateSecret_Success tests the CreateSecret method.
+func TestCreateSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+		assert.Equal(t, "my-secret", req["name"])
+		assert.Equal(t, "secret-value", req["value"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"success": true,
+			"name":    "my-secret",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.CreateSecret(context.Background(), &stromboli.CreateSecretRequest{
+		Name:  "my-secret",
+		Value: "secret-value",
+	})
+
+	// Assert
+	require.NoError(t, err)
+}
+
+// TestCreateSecret_EmptyName tests CreateSecret with an empty name.
+func TestCreateSecret_EmptyName(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	err = client.CreateSecret(context.Background(), &stromboli.CreateSecretRequest{
+		Name:  "",
+		Value: "value",
+	})
+
+	// Assert
+	require.Error(t, err)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestGetSecret_Success tests the GetSecret method.
+func TestGetSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets/github-token", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":         "abc123",
+			"name":       "github-token",
+			"created_at": "2024-01-15T10:30:00Z",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	secret, err := client.GetSecret(context.Background(), "github-token")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "abc123", secret.ID)
+	assert.Equal(t, "github-token", secret.Name)
+	assert.Equal(t, "2024-01-15T10:30:00Z", secret.CreatedAt)
+}
+
+// TestGetSecret_NotFound tests GetSecret with a non-existent secret.
+func TestGetSecret_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "secret not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	secret, err := client.GetSecret(context.Background(), "unknown")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, secret)
+}
+
+// TestDeleteSecret_Success tests the DeleteSecret method.
+func TestDeleteSecret_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/secrets/github-token", r.URL.Path)
+		assert.Equal(t, http.MethodDelete, r.Method)
+
+		// Return success
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, map[string]interface{}{"success": true})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	err = client.DeleteSecret(context.Background(), "github-token")
+
+	// Assert
+	require.NoError(t, err)
+}
+
+// TestDeleteSecret_EmptyName tests DeleteSecret with an empty name.
+func TestDeleteSecret_EmptyName(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	err = client.DeleteSecret(context.Background(), "")
+
+	// Assert
+	require.Error(t, err)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// ============================================================================
+// Images Tests
+// ============================================================================
+
+// TestListImages_Success tests the ListImages method.
+func TestListImages_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"images": []map[string]interface{}{
+				{
+					"id":                 "sha256:abc123",
+					"repository":         "python",
+					"tag":                "3.12-slim",
+					"size":               125000000,
+					"compatible":         true,
+					"compatibility_rank": 2,
+				},
+				{
+					"id":                 "sha256:def456",
+					"repository":         "alpine",
+					"tag":                "latest",
+					"compatible":         false,
+					"compatibility_rank": 4,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	images, err := client.ListImages(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, images, 2)
+	assert.Equal(t, "python", images[0].Repository)
+	assert.Equal(t, "3.12-slim", images[0].Tag)
+	assert.True(t, images[0].Compatible)
+	assert.Equal(t, int64(2), images[0].CompatibilityRank)
+	assert.False(t, images[1].Compatible)
+}
+
+// TestListImages_Empty tests ListImages when no images exist.
+func TestListImages_Empty(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := map[string]interface{}{
+			"images": []map[string]interface{}{},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	images, err := client.ListImages(context.Background())
+
+	// Assert
+	require.NoError(t, err)
+	assert.Empty(t, images)
+}
+
+// TestGetImage_Success tests the GetImage method.
+func TestGetImage_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/python:3.12", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":                 "sha256:abc123def456",
+			"repository":         "python",
+			"tag":                "3.12",
+			"size":               125000000,
+			"compatible":         true,
+			"compatibility_rank": 2,
+			"tools":              []string{"python", "pip"},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	image, err := client.GetImage(context.Background(), "python:3.12")
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "sha256:abc123def456", image.ID)
+	assert.Equal(t, "python", image.Repository)
+	assert.True(t, image.Compatible)
+	assert.Contains(t, image.Tools, "python")
+}
+
+// TestGetImage_NotFound tests GetImage with a non-existent image.
+func TestGetImage_NotFound(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		mustEncode(w, map[string]string{"error": "image not found"})
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	image, err := client.GetImage(context.Background(), "nonexistent:latest")
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, image)
+}
+
+// TestSearchImages_Success tests the SearchImages method.
+func TestSearchImages_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/search", r.URL.Path)
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "python", r.URL.Query().Get("q"))
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"results": []map[string]interface{}{
+				{
+					"name":        "python",
+					"description": "Python is an interpreted programming language",
+					"stars":       8500,
+					"official":    true,
+				},
+				{
+					"name":        "pypy",
+					"description": "PyPy is a fast Python implementation",
+					"stars":       500,
+					"official":    false,
+				},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	results, err := client.SearchImages(context.Background(), &stromboli.SearchImagesOptions{
+		Query: "python",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.Len(t, results, 2)
+	assert.Equal(t, "python", results[0].Name)
+	assert.Equal(t, int64(8500), results[0].Stars)
+	assert.True(t, results[0].Official)
+}
+
+// TestSearchImages_EmptyQuery tests SearchImages with an empty query.
+func TestSearchImages_EmptyQuery(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	results, err := client.SearchImages(context.Background(), &stromboli.SearchImagesOptions{
+		Query: "",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, results)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestPullImage_Success tests the PullImage method.
+func TestPullImage_Success(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Verify request
+		assert.Equal(t, "/images/pull", r.URL.Path)
+		assert.Equal(t, http.MethodPost, r.Method)
+
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+		assert.Equal(t, "python:3.12-slim", req["image"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"success":  true,
+			"image":    "python:3.12-slim",
+			"image_id": "sha256:abc123def456",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.PullImage(context.Background(), &stromboli.PullImageRequest{
+		Image: "python:3.12-slim",
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "python:3.12-slim", result.Image)
+	assert.Equal(t, "sha256:abc123def456", result.ImageID)
+}
+
+// TestPullImage_EmptyImage tests PullImage with an empty image name.
+func TestPullImage_EmptyImage(t *testing.T) {
+	// Arrange
+	client, err := stromboli.NewClient("http://localhost:8585")
+	require.NoError(t, err)
+
+	// Act
+	result, err := client.PullImage(context.Background(), &stromboli.PullImageRequest{
+		Image: "",
+	})
+
+	// Assert
+	require.Error(t, err)
+	assert.Nil(t, result)
+	var apiErr *stromboli.Error
+	require.ErrorAs(t, err, &apiErr)
+	assert.Equal(t, "BAD_REQUEST", apiErr.Code)
+}
+
+// TestRun_WithLifecycleHooks tests Run with lifecycle hooks.
+func TestRun_WithLifecycleHooks(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Podman options with lifecycle
+		podman, ok := req["podman"].(map[string]interface{})
+		require.True(t, ok)
+		lifecycle, ok := podman["lifecycle"].(map[string]interface{})
+		require.True(t, ok)
+
+		onCreate, ok := lifecycle["on_create_command"].([]interface{})
+		require.True(t, ok)
+		assert.Contains(t, onCreate, "pip install -r requirements.txt")
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-hooks123",
+			"status": "completed",
+			"output": "Task completed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Run with hooks",
+		Podman: &stromboli.PodmanOptions{
+			Lifecycle: &stromboli.LifecycleHooks{
+				OnCreateCommand: []string{"pip install -r requirements.txt"},
+				PostStart:       []string{"redis-server --daemonize yes"},
+				HooksTimeout:    "5m",
+			},
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
+}
+
+// TestRun_WithComposeEnvironment tests Run with compose environment.
+func TestRun_WithComposeEnvironment(t *testing.T) {
+	// Arrange
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Parse request body
+		var req map[string]interface{}
+		mustDecode(r, &req)
+
+		// Verify Podman options with environment
+		podman, ok := req["podman"].(map[string]interface{})
+		require.True(t, ok)
+		env, ok := podman["environment"].(map[string]interface{})
+		require.True(t, ok)
+
+		assert.Equal(t, "compose", env["type"])
+		assert.Equal(t, "/path/to/docker-compose.yml", env["path"])
+		assert.Equal(t, "dev", env["service"])
+
+		// Return mock response
+		resp := map[string]interface{}{
+			"id":     "run-compose123",
+			"status": "completed",
+			"output": "Task completed",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mustEncode(w, resp)
+	}))
+	defer server.Close()
+
+	// Act
+	client, err := stromboli.NewClient(server.URL)
+	require.NoError(t, err)
+	result, err := client.Run(context.Background(), &stromboli.RunRequest{
+		Prompt: "Run with compose",
+		Podman: &stromboli.PodmanOptions{
+			Environment: &stromboli.EnvironmentConfig{
+				Type:    "compose",
+				Path:    "/path/to/docker-compose.yml",
+				Service: "dev",
+			},
+		},
+	})
+
+	// Assert
+	require.NoError(t, err)
+	assert.True(t, result.IsSuccess())
 }
 
 // ============================================================================

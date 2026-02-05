@@ -135,6 +135,38 @@ var (
 		Message: "service temporarily unavailable",
 		Status:  503,
 	}
+
+	// ErrSecretExists indicates a secret with this name already exists.
+	// HTTP status: 409.
+	ErrSecretExists = &Error{
+		Code:    "SECRET_EXISTS",
+		Message: "secret already exists",
+		Status:  409,
+	}
+
+	// ErrInvalidSecretName indicates the secret name is invalid.
+	// HTTP status: 400.
+	ErrInvalidSecretName = &Error{
+		Code:    "INVALID_SECRET_NAME",
+		Message: "invalid secret name",
+		Status:  400,
+	}
+
+	// ErrImageNotFound indicates the requested image was not found.
+	// HTTP status: 404.
+	ErrImageNotFound = &Error{
+		Code:    "IMAGE_NOT_FOUND",
+		Message: "image not found",
+		Status:  404,
+	}
+
+	// ErrImagePullFailed indicates the image pull operation failed.
+	// HTTP status: 500.
+	ErrImagePullFailed = &Error{
+		Code:    "IMAGE_PULL_FAILED",
+		Message: "failed to pull image",
+		Status:  500,
+	}
 )
 
 // newError creates a new Error with the given parameters.
