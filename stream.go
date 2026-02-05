@@ -263,7 +263,13 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 			return nil, err
 		}
 
-		// Track event size to prevent memory exhaustion from malformed streams
+		// Check individual line size first to prevent unbounded memory allocation
+		// from a single malicious line before accumulating into totalSize
+		if len(line) > maxEventSize {
+			return nil, fmt.Errorf("single line exceeds maximum size of %d bytes", maxEventSize)
+		}
+
+		// Track cumulative event size to prevent memory exhaustion from malformed streams
 		totalSize += len(line)
 		if totalSize > maxEventSize {
 			return nil, fmt.Errorf("event exceeds maximum size of %d bytes", maxEventSize)
@@ -379,6 +385,11 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 	}
 	if req.Prompt == "" {
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
+	}
+	if len(req.Prompt) > maxPromptSize {
+		return nil, newError("BAD_REQUEST",
+			fmt.Sprintf("prompt exceeds maximum size of %d bytes (got %d)", maxPromptSize, len(req.Prompt)),
+			400, nil)
 	}
 
 	// Apply stream timeout if set and no context deadline exists.

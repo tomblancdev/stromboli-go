@@ -986,7 +986,7 @@ func (c *Client) DestroySession(ctx context.Context, sessionID string) error {
 //	}
 //
 //	for _, msg := range messages.Messages {
-//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	    fmt.Printf("[%s] %s\n", msg.Type, msg.UUID)
 //	}
 //
 // With pagination:
@@ -1016,9 +1016,17 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 
 	// Apply options if provided
 	if opts != nil {
+		// Validate negative values - catch client-side for better error messages
+		if opts.Limit < 0 {
+			return nil, newError("BAD_REQUEST", "limit cannot be negative", 400, nil)
+		}
+		if opts.Offset < 0 {
+			return nil, newError("BAD_REQUEST", "offset cannot be negative", 400, nil)
+		}
 		if opts.Limit > 0 {
 			params.SetLimit(&opts.Limit)
 		}
+		// Note: Offset == 0 is valid (start from beginning), so > 0 check is correct
 		if opts.Offset > 0 {
 			params.SetOffset(&opts.Offset)
 		}
@@ -1065,7 +1073,7 @@ func (c *Client) GetMessages(ctx context.Context, sessionID string, opts *GetMes
 //	    log.Fatal(err)
 //	}
 //
-//	fmt.Printf("Role: %s\n", msg.Role)
+//	fmt.Printf("Role: %s\n", msg.Type)
 //	fmt.Printf("Content: %v\n", msg.Content)
 func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*Message, error) {
 	if sessionID == "" {
@@ -1970,14 +1978,10 @@ func validateRequestSize(req *RunRequest) error {
 //   - github.com/santhosh-tekuri/jsonschema
 //   - github.com/xeipuuv/gojsonschema
 func validateJSONSchema(schema string) error {
-	if !json.Valid([]byte(schema)) {
-		return fmt.Errorf("not valid JSON")
-	}
-
-	// Parse the schema to check for required properties
+	// Parse the schema (single parse instead of json.Valid + Unmarshal)
 	var s map[string]interface{}
 	if err := json.Unmarshal([]byte(schema), &s); err != nil {
-		return err
+		return fmt.Errorf("not valid JSON: %w", err)
 	}
 
 	// Check for at least one valid JSON Schema keyword

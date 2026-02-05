@@ -657,7 +657,7 @@ type GetMessagesOptions struct {
 //
 //	resp, _ := client.GetMessages(ctx, "sess-abc123", nil)
 //	for _, msg := range resp.Messages {
-//	    fmt.Printf("[%s] %s\n", msg.Role, msg.UUID)
+//	    fmt.Printf("[%s] %s\n", msg.Type, msg.UUID)
 //	}
 //
 //	if resp.HasMore {
@@ -776,6 +776,9 @@ func (m *Message) ContentAsString() (string, bool) {
 
 // ContentAsBlocks returns the content as a slice of maps if it contains content blocks.
 // Returns nil and false if content is not in block format.
+//
+// WARNING: Non-map entries in the content array are silently skipped. If you need
+// to handle mixed content types, use json.Marshal/Unmarshal instead.
 //
 // For more precise typing, use json.Marshal/Unmarshal:
 //

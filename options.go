@@ -154,7 +154,10 @@ func WithRetries(n int) Option {
 // The provided client's Timeout field is ignored in favor of
 // [WithTimeout]. Use [WithTimeout] to control request timeouts.
 //
-// Default: [http.DefaultClient].
+// Passing nil is a no-op and the default client is retained.
+// This is typically a programmer error; consider checking for nil before calling.
+//
+// Default: A new [http.Client] with cloned [http.DefaultTransport].
 //
 // Example:
 //
@@ -173,7 +176,7 @@ func WithHTTPClient(httpClient *http.Client) Option {
 		if httpClient != nil {
 			c.httpClient = httpClient
 		}
-		// If nil, keep the default http.DefaultClient
+		// nil is silently ignored - default client is retained
 	}
 }
 

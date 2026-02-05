@@ -92,8 +92,22 @@ func (e *Error) Is(target error) bool {
 //	if errors.Is(err, stromboli.ErrNotFound) {
 //	    fmt.Println("Resource not found")
 //	}
+//
+// # Error Design
+//
+// Generic errors (ErrNotFound, ErrTimeout, etc.) are used for most resources.
+// Resource-specific errors exist where the failure mode is domain-specific:
+//
+//   - Images: [ErrImageNotFound], [ErrImagePullFailed] - container image operations
+//     have distinct failure modes (local lookup vs registry pull)
+//   - Secrets: [ErrSecretExists], [ErrInvalidSecretName] - secret operations have
+//     specific validation and conflict rules
+//
+// When checking for "not found" errors, use the specific error if available
+// (e.g., ErrImageNotFound for images), or ErrNotFound for other resources.
 var (
 	// ErrNotFound indicates the requested resource does not exist.
+	// Used for jobs, sessions, and other resources without specific not-found errors.
 	// HTTP status: 404.
 	ErrNotFound = &Error{
 		Code:    "NOT_FOUND",
@@ -161,7 +175,10 @@ var (
 		Status:  400,
 	}
 
-	// ErrImageNotFound indicates the requested image was not found.
+	// ErrImageNotFound indicates the requested image was not found locally.
+	// This is distinct from [ErrNotFound] to differentiate between local image
+	// lookup failures and other resource not-found errors.
+	// Use [Client.PullImage] to fetch the image from a registry.
 	// HTTP status: 404.
 	ErrImageNotFound = &Error{
 		Code:    "IMAGE_NOT_FOUND",
