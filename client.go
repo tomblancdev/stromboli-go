@@ -29,7 +29,37 @@ import (
 const (
 	// defaultTimeout is the default request timeout.
 	defaultTimeout = 30 * time.Second
+
+	// maxPromptSize limits the maximum prompt size to prevent memory exhaustion.
+	// 1MB should accommodate even very large prompts while providing a safety limit.
+	maxPromptSize = 1 * 1024 * 1024 // 1MB
+
+	// maxSystemPromptSize limits the maximum system prompt size.
+	// System prompts are typically smaller than user prompts.
+	maxSystemPromptSize = 256 * 1024 // 256KB
+
+	// maxJSONSchemaSize limits the maximum JSON schema size.
+	// JSON schemas are typically small, but complex schemas can be larger.
+	maxJSONSchemaSize = 64 * 1024 // 64KB
 )
+
+var (
+	// defaultTransportOnce ensures we only clone DefaultTransport once.
+	// This prevents potential races if DefaultTransport is modified concurrently.
+	defaultTransportOnce sync.Once
+	defaultTransportCopy *http.Transport
+)
+
+// getDefaultTransport returns a cached clone of http.DefaultTransport.
+// This is safe to call from multiple goroutines.
+func getDefaultTransport() *http.Transport {
+	defaultTransportOnce.Do(func() {
+		if t, ok := http.DefaultTransport.(*http.Transport); ok {
+			defaultTransportCopy = t.Clone()
+		}
+	})
+	return defaultTransportCopy
+}
 
 // Client is the Stromboli API client.
 //
@@ -75,6 +105,10 @@ type Client struct {
 
 	// timeout is the default request timeout.
 	timeout time.Duration
+
+	// streamTimeout is the default timeout for streaming requests.
+	// If set and no context deadline exists, this timeout is applied.
+	streamTimeout time.Duration
 
 	// userAgent is the User-Agent header value.
 	userAgent string
@@ -136,9 +170,9 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 		userAgent:  fmt.Sprintf("stromboli-go/%s", Version),
 	}
 
-	// Safely clone transport if possible - avoids panic if DefaultTransport
-	// is not a *http.Transport (e.g., in test environments or custom setups)
-	if t, ok := http.DefaultTransport.(*http.Transport); ok {
+	// Use cached transport clone to avoid potential races with DefaultTransport.
+	// getDefaultTransport() uses sync.Once to ensure thread-safe initialization.
+	if t := getDefaultTransport(); t != nil {
 		c.httpClient.Transport = t.Clone()
 	}
 
@@ -166,7 +200,7 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 	req = req.Clone(req.Context())
 	req.Header.Set("User-Agent", t.userAgent)
 
-	// Call request hook if set
+	// Call request hook unconditionally - request is always valid at this point.
 	if t.requestHook != nil {
 		t.requestHook(req)
 	}
@@ -177,7 +211,10 @@ func (t *userAgentTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	resp, err := base.RoundTrip(req)
 
-	// Call response hook if set (even on error, resp may be non-nil)
+	// Call response hook only if we have a response.
+	// On network errors, resp may be nil, so we skip the hook.
+	// This asymmetry is intentional: request hooks fire for all requests,
+	// response hooks fire only for successful network round-trips.
 	if t.responseHook != nil && resp != nil {
 		t.responseHook(resp)
 	}
@@ -216,7 +253,12 @@ func (c *Client) effectiveTimeout(ctx context.Context) time.Duration {
 	timeout := c.timeout
 	if deadline, ok := ctx.Deadline(); ok {
 		remaining := time.Until(deadline)
-		if remaining > 0 && remaining < timeout {
+		if remaining <= 0 {
+			// Deadline already passed - return minimal timeout.
+			// The request will likely fail immediately with context deadline exceeded.
+			return time.Millisecond
+		}
+		if remaining < timeout {
 			timeout = remaining
 		}
 	}
@@ -415,6 +457,11 @@ func (c *Client) Run(ctx context.Context, req *RunRequest) (*RunResponse, error)
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate request size limits
+	if err := validateRequestSize(req); err != nil {
+		return nil, err
+	}
+
 	// Validate JSON schema if provided
 	if req.Claude != nil && req.Claude.JSONSchema != "" {
 		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
@@ -503,6 +550,11 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Validate request size limits
+	if err := validateRequestSize(req); err != nil {
+		return nil, err
+	}
+
 	// Validate JSON schema if provided
 	if req.Claude != nil && req.Claude.JSONSchema != "" {
 		if err := validateJSONSchema(req.Claude.JSONSchema); err != nil {
@@ -536,7 +588,8 @@ func (c *Client) RunAsync(ctx context.Context, req *RunRequest) (*AsyncRunRespon
 	}, nil
 }
 
-// toGeneratedRunRequest converts a RunRequest to the generated model.
+// toGeneratedRunRequest converts a RunRequest to the generated model for API calls.
+// It maps all Claude and Podman options to their corresponding generated types.
 func toGeneratedRunRequest(req *RunRequest) *models.RunRequest {
 	prompt := req.Prompt
 	genReq := &models.RunRequest{
@@ -785,7 +838,8 @@ func (c *Client) CancelJob(ctx context.Context, jobID string) error {
 	return nil
 }
 
-// fromGeneratedJobResponse converts a generated JobResponse to our Job type.
+// fromGeneratedJobResponse converts a generated JobResponse model to the SDK Job type.
+// It handles the mapping of all fields including optional crash info.
 func fromGeneratedJobResponse(j *models.JobResponse) *Job {
 	job := &Job{
 		ID:        j.ID,
@@ -1031,7 +1085,8 @@ func (c *Client) GetMessage(ctx context.Context, sessionID, messageID string) (*
 	return fromGeneratedMessage(payload.Message), nil
 }
 
-// fromGeneratedMessage converts a generated message to our Message type.
+// fromGeneratedMessage converts a generated message model to the SDK Message type.
+// Note: Content and ToolResult are exposed as interface{} for flexibility.
 func fromGeneratedMessage(m *models.StromboliInternalHistoryMessage) *Message {
 	return &Message{
 		UUID:           m.UUID,
@@ -1104,10 +1159,12 @@ var httpStatusToErrorCode = map[int]string{
 func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) error {
 	status := apiErr.Code
 
-	// Extract server message if available, otherwise use fallback
-	serverMsg := apiErr.Error()
-	if serverMsg == "" {
-		serverMsg = fallbackMsg
+	// Extract the most useful error message:
+	// 1. Try the API error's message
+	// 2. Fall back to the provided fallback message
+	serverMsg := fallbackMsg
+	if msg := apiErr.Error(); msg != "" && msg != fmt.Sprintf("[%d] ", status) {
+		serverMsg = msg
 	}
 
 	// Look up error code in table
@@ -1128,6 +1185,11 @@ func (c *Client) handleAPIError(apiErr *runtime.APIError, fallbackMsg string) er
 // ----------------------------------------------------------------------------
 
 // bearerAuth returns a runtime.ClientAuthInfoWriter for Bearer token auth.
+//
+// Note: The token value is captured at the time this method is called.
+// If SetToken is called between bearerAuth() and the actual request execution,
+// the request will use the token value from when bearerAuth() was called.
+// This is typically the expected behavior for authenticated request sequences.
 func (c *Client) bearerAuth() runtime.ClientAuthInfoWriter {
 	return httptransport.BearerToken(c.getToken())
 }
@@ -1857,8 +1919,40 @@ func fromGeneratedImageDetail(img *models.ImageDetailResponse) *Image {
 	}
 }
 
-// validateJSONSchema checks if the schema is valid JSON and has basic schema properties.
-// It validates that the schema contains at least one of the required schema keywords.
+// validateRequestSize checks that request fields don't exceed size limits.
+// This prevents memory exhaustion from excessively large requests.
+func validateRequestSize(req *RunRequest) error {
+	if len(req.Prompt) > maxPromptSize {
+		return newError("BAD_REQUEST",
+			fmt.Sprintf("prompt exceeds maximum size of %d bytes (got %d)", maxPromptSize, len(req.Prompt)),
+			400, nil)
+	}
+	if req.Claude != nil {
+		if len(req.Claude.SystemPrompt) > maxSystemPromptSize {
+			return newError("BAD_REQUEST",
+				fmt.Sprintf("system prompt exceeds maximum size of %d bytes (got %d)", maxSystemPromptSize, len(req.Claude.SystemPrompt)),
+				400, nil)
+		}
+		if len(req.Claude.JSONSchema) > maxJSONSchemaSize {
+			return newError("BAD_REQUEST",
+				fmt.Sprintf("JSON schema exceeds maximum size of %d bytes (got %d)", maxJSONSchemaSize, len(req.Claude.JSONSchema)),
+				400, nil)
+		}
+	}
+	return nil
+}
+
+// validateJSONSchema performs basic validation of a JSON schema string.
+//
+// This is a basic check that verifies:
+//   - The string is valid JSON
+//   - The schema contains at least one recognized schema keyword
+//     (type, $ref, oneOf, anyOf, allOf, enum, or const)
+//
+// Note: This does NOT fully validate JSON Schema compliance.
+// Invalid schemas may pass this check but fail server-side validation.
+// For production use, consider pre-validating schemas with a dedicated
+// JSON Schema validator library.
 func validateJSONSchema(schema string) error {
 	if !json.Valid([]byte(schema)) {
 		return fmt.Errorf("not valid JSON")

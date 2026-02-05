@@ -1,5 +1,7 @@
 package stromboli
 
+import "time"
+
 // ----------------------------------------------------------------------------
 // System Types
 // ----------------------------------------------------------------------------
@@ -434,15 +436,20 @@ type EnvironmentConfig struct {
 
 // RunResponse represents the result of a synchronous Claude execution.
 //
+// Important: A nil error from [Client.Run] means the API call succeeded,
+// not necessarily that Claude execution succeeded. Always check Status
+// and Error fields to determine if the execution completed successfully.
+//
 // Check Status to determine if execution succeeded:
 //
 //	result, err := client.Run(ctx, req)
 //	if err != nil {
-//	    log.Fatal(err)
+//	    log.Fatal(err) // API call failed
 //	}
 //	if result.IsSuccess() {
 //	    fmt.Println(result.Output)
 //	} else {
+//	    // Execution failed - check result.Error for details
 //	    fmt.Printf("Execution failed: %s\n", result.Error)
 //	}
 type RunResponse struct {
@@ -571,6 +578,26 @@ func (j *Job) IsCancelled() bool {
 // IsPending returns true if the job is pending (queued but not yet started).
 func (j *Job) IsPending() bool {
 	return j.Status == JobStatusPending
+}
+
+// CreatedAtTime parses CreatedAt as time.Time.
+// Returns zero time if CreatedAt is empty or parsing fails.
+func (j *Job) CreatedAtTime() time.Time {
+	if j.CreatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, j.CreatedAt)
+	return t
+}
+
+// UpdatedAtTime parses UpdatedAt as time.Time.
+// Returns zero time if UpdatedAt is empty or parsing fails.
+func (j *Job) UpdatedAtTime() time.Time {
+	if j.UpdatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, j.UpdatedAt)
+	return t
 }
 
 // CrashInfo contains details about a job crash.
@@ -715,6 +742,51 @@ type Message struct {
 	ToolResult interface{} `json:"tool_result,omitempty"`
 }
 
+// TimestampTime parses Timestamp as time.Time.
+// Returns zero time if Timestamp is empty or parsing fails.
+func (m *Message) TimestampTime() time.Time {
+	if m.Timestamp == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, m.Timestamp)
+	return t
+}
+
+// ContentAsString returns the content as a string if it is a simple string message.
+// Returns empty string and false if content is not a string.
+//
+// Example:
+//
+//	if text, ok := msg.ContentAsString(); ok {
+//	    fmt.Println(text)
+//	}
+func (m *Message) ContentAsString() (string, bool) {
+	s, ok := m.Content.(string)
+	return s, ok
+}
+
+// ContentAsBlocks returns the content as a slice of maps if it contains content blocks.
+// Returns nil and false if content is not in block format.
+//
+// For more precise typing, use json.Marshal/Unmarshal:
+//
+//	data, _ := json.Marshal(msg.Content)
+//	var blocks []YourBlockType
+//	json.Unmarshal(data, &blocks)
+func (m *Message) ContentAsBlocks() ([]map[string]interface{}, bool) {
+	blocks, ok := m.Content.([]interface{})
+	if !ok {
+		return nil, false
+	}
+	result := make([]map[string]interface{}, 0, len(blocks))
+	for _, b := range blocks {
+		if block, ok := b.(map[string]interface{}); ok {
+			result = append(result, block)
+		}
+	}
+	return result, len(result) > 0
+}
+
 // ----------------------------------------------------------------------------
 // Secrets Types
 // ----------------------------------------------------------------------------
@@ -742,6 +814,16 @@ type Secret struct {
 	// CreatedAt is when the secret was created (RFC3339 format).
 	// Example: "2024-01-15T10:30:00Z"
 	CreatedAt string `json:"created_at,omitempty"`
+}
+
+// CreatedAtTime parses CreatedAt as time.Time.
+// Returns zero time if CreatedAt is empty or parsing fails.
+func (s *Secret) CreatedAtTime() time.Time {
+	if s.CreatedAt == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, s.CreatedAt)
+	return t
 }
 
 // CreateSecretRequest represents a request to create a new Podman secret.
@@ -815,6 +897,16 @@ type Image struct {
 	// Tools lists tools available in the image.
 	// Example: []string{"python", "pip", "git"}
 	Tools []string `json:"tools,omitempty"`
+}
+
+// CreatedTime parses Created as time.Time.
+// Returns zero time if Created is empty or parsing fails.
+func (i *Image) CreatedTime() time.Time {
+	if i.Created == "" {
+		return time.Time{}
+	}
+	t, _ := time.Parse(time.RFC3339, i.Created)
+	return t
 }
 
 // ImageSearchResult represents a search result from a container registry.
@@ -914,7 +1006,14 @@ type PullImageResponse struct {
 // ----------------------------------------------------------------------------
 
 // Model represents a Claude model identifier.
-// Use the Model* constants for type-safe model selection.
+//
+// The SDK provides constants for common models (ModelHaiku, ModelSonnet, ModelOpus).
+// For newer models not yet added to the SDK, you can cast any string to Model:
+//
+//	customModel := stromboli.Model("claude-3-5-sonnet-20241022")
+//
+// Model values are passed directly to the API, so you can use any model
+// identifier supported by the Stromboli server.
 type Model string
 
 // Model constants for Claude model selection.

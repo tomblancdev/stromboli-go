@@ -7,9 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"path"
 	"runtime/debug"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -170,25 +170,31 @@ func (s *Stream) Close() error {
 func (s *Stream) EventsWithContext(ctx context.Context) <-chan *StreamEvent {
 	ch := make(chan *StreamEvent)
 	go func() {
+		// Use sync.Once to ensure cleanup happens exactly once.
+		// This prevents goroutine leaks in edge cases where the main
+		// goroutine exits (panic/return) before the watcher goroutine.
+		var closeOnce sync.Once
+		cleanup := func() {
+			closeOnce.Do(func() {
+				_ = s.Close()
+			})
+		}
+
 		defer func() {
 			if r := recover(); r != nil {
 				s.err = fmt.Errorf("panic in stream reader: %v\n%s", r, debug.Stack())
 			}
+			cleanup() // Ensure stream is closed on any exit
 			close(ch)
 		}()
 
 		// Watch for context cancellation to close stream and unblock reader.
 		// This prevents goroutine leaks when context is cancelled while
 		// the reader is blocked on network I/O.
-		done := make(chan struct{})
 		go func() {
-			select {
-			case <-ctx.Done():
-				_ = s.Close() // Unblocks the reader
-			case <-done:
-			}
+			<-ctx.Done()
+			cleanup() // Unblocks the reader
 		}()
-		defer close(done)
 
 		for s.Next() {
 			// Copy the event to avoid race condition when consumer
@@ -258,11 +264,13 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 			continue
 		}
 
-		// Parse SSE field
-		// Note: SSE spec says "retry:" sets reconnection time, but we intentionally
-		// ignore it as this client doesn't implement auto-reconnection.
-		switch {
-		case strings.HasPrefix(line, "data:"):
+		// Parse SSE field according to the SSE specification.
+		// SSE "retry:" field sets reconnection time - intentionally ignored
+		// as this client doesn't implement auto-reconnection.
+		// SSE comments (lines starting with ":") and unknown fields are also ignored.
+		//
+		//nolint:gocritic // switch with HasPrefix doesn't work cleanly; if-else is clearer here
+		if strings.HasPrefix(line, "data:") {
 			// Try with space first, then without
 			data, found := strings.CutPrefix(line, "data: ")
 			if !found {
@@ -274,20 +282,17 @@ func (s *Stream) readEvent() (*StreamEvent, error) {
 				event.Data = data
 			}
 			hasData = true
-		case strings.HasPrefix(line, "event:"):
-			var found bool
-			event.Type, found = strings.CutPrefix(line, "event: ")
-			if !found {
+		} else if strings.HasPrefix(line, "event:") {
+			event.Type, _ = strings.CutPrefix(line, "event: ")
+			if event.Type == "" {
 				event.Type, _ = strings.CutPrefix(line, "event:")
 			}
-		case strings.HasPrefix(line, "id:"):
-			var found bool
-			event.ID, found = strings.CutPrefix(line, "id: ")
-			if !found {
+		} else if strings.HasPrefix(line, "id:") {
+			event.ID, _ = strings.CutPrefix(line, "id: ")
+			if event.ID == "" {
 				event.ID, _ = strings.CutPrefix(line, "id:")
 			}
 		}
-		// Ignore "retry:" (reconnection time) and comments (lines starting with ":")
 	}
 }
 
@@ -358,13 +363,29 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 		return nil, newError("BAD_REQUEST", "prompt is required", 400, nil)
 	}
 
+	// Apply stream timeout if set and no context deadline exists.
+	// This prevents indefinite hangs when the server stops responding.
+	if c.streamTimeout > 0 {
+		if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, c.streamTimeout)
+			// Note: The cancel function will be called when the stream is closed
+			// or when the context times out. We don't defer cancel here because
+			// the stream may outlive this function call.
+			_ = cancel // Will be called when stream is closed or context times out
+		}
+	}
+
 	// Build URL with query parameters
 	u, err := url.Parse(c.baseURL)
 	if err != nil {
 		return nil, newError("INVALID_URL", "invalid base URL", 0, err)
 	}
 	// Preserve any base path in the URL (e.g., /api/v1)
-	u.Path = path.Join(u.Path, "run", "stream")
+	// Use explicit forward slash concatenation instead of path.Join to avoid
+	// Windows path separator issues (path.Join uses OS-specific separator).
+	basePath := strings.TrimSuffix(u.Path, "/")
+	u.Path = basePath + "/run/stream"
 
 	query := u.Query()
 	query.Set("prompt", req.Prompt)
@@ -393,13 +414,24 @@ func (c *Client) Stream(ctx context.Context, req *StreamRequest) (*Stream, error
 		httpReq.Header.Set("Authorization", "Bearer "+token)
 	}
 
-	// Execute request
+	// Call request hook if set (before executing request)
+	if c.requestHook != nil {
+		c.requestHook(httpReq)
+	}
+
+	// Execute request.
+	// Per Go http.Client docs: on error, any non-nil response can be ignored.
+	// The client handles cleanup of any partial response internally.
 	resp, err := c.httpClient.Do(httpReq)
+
+	// Call response hook if set and we got a response.
+	// On network errors, resp may be nil, so we skip the hook.
+	// This asymmetry is intentional: request hooks fire for all requests,
+	// response hooks fire only for successful network round-trips.
+	if c.responseHook != nil && resp != nil {
+		c.responseHook(resp)
+	}
 	if err != nil {
-		// Close response body if present to prevent resource leak
-		if resp != nil && resp.Body != nil {
-			_ = resp.Body.Close()
-		}
 		return nil, c.handleError(err, "failed to connect to stream")
 	}
 

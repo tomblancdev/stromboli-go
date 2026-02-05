@@ -73,8 +73,8 @@
 //
 // The SDK is built in two layers:
 //
-//   - Wrapper Layer: Clean, idiomatic Go API with context support,
-//     retries, and error handling (this package)
+//   - Wrapper Layer: Clean, idiomatic Go API with context support
+//     and typed error handling (this package)
 //   - Generated Layer: Auto-generated HTTP client from OpenAPI spec
 //     (github.com/tomblancdev/stromboli-go/generated)
 //

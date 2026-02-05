@@ -6,6 +6,41 @@ import (
 	"time"
 )
 
+// Logger is the interface used for SDK logging.
+// Implement this interface to customize log output.
+type Logger interface {
+	Printf(format string, v ...interface{})
+}
+
+// defaultLogger wraps the standard log package.
+type defaultLogger struct{}
+
+func (defaultLogger) Printf(format string, v ...interface{}) {
+	log.Printf(format, v...)
+}
+
+// sdkLogger is the logger used by the SDK for warnings and debug output.
+// Can be replaced via SetLogger.
+var sdkLogger Logger = defaultLogger{}
+
+// SetLogger sets the logger used by the SDK for warnings and debug output.
+// Pass nil to restore the default logger (standard log package).
+//
+// Example:
+//
+//	// Use a custom logger
+//	stromboli.SetLogger(myLogger)
+//
+//	// Restore default
+//	stromboli.SetLogger(nil)
+func SetLogger(l Logger) {
+	if l == nil {
+		sdkLogger = defaultLogger{}
+	} else {
+		sdkLogger = l
+	}
+}
+
 // Option configures a [Client].
 //
 // Options are passed to [NewClient] to customize the client behavior.
@@ -47,6 +82,34 @@ func WithTimeout(d time.Duration) Option {
 	}
 }
 
+// WithStreamTimeout sets the default timeout for streaming requests.
+//
+// Unlike regular requests, streams are long-running connections where data
+// arrives incrementally. This timeout applies only if no context deadline
+// is set when calling [Client.Stream].
+//
+// If not set, streaming requests have no timeout by default. This can be
+// dangerous as a stalled server may cause the client to hang indefinitely.
+// It's recommended to either set this option or use context.WithTimeout.
+//
+// A timeout of zero or negative disables the stream timeout (not recommended).
+//
+// Example:
+//
+//	client, err := stromboli.NewClient(url,
+//	    stromboli.WithStreamTimeout(5*time.Minute),
+//	)
+//
+//	// Now Stream will automatically timeout after 5 minutes if no context deadline is set
+//	stream, err := client.Stream(ctx, req)
+func WithStreamTimeout(d time.Duration) Option {
+	return func(c *Client) {
+		if d > 0 {
+			c.streamTimeout = d
+		}
+	}
+}
+
 // WithRetries sets the maximum number of retry attempts for failed requests.
 //
 // Deprecated: Retry logic is not implemented. This option logs a warning
@@ -57,7 +120,7 @@ func WithTimeout(d time.Duration) Option {
 func WithRetries(n int) Option {
 	return func(_ *Client) {
 		if n > 0 {
-			log.Printf("stromboli: WARNING: WithRetries(%d) is deprecated and has no effect", n)
+			sdkLogger.Printf("stromboli: WARNING: WithRetries(%d) is deprecated and has no effect", n)
 		}
 	}
 }
@@ -122,6 +185,8 @@ func WithUserAgent(userAgent string) Option {
 // Use this option when you already have a valid access token and
 // want to create an authenticated client from the start.
 //
+// Pass an empty string to clear any previously set token.
+//
 // Alternatively, use [Client.SetToken] to set the token after
 // client creation, or [Client.GetToken] to obtain a new token.
 //
@@ -135,7 +200,7 @@ func WithUserAgent(userAgent string) Option {
 //	validation, err := client.ValidateToken(ctx)
 func WithToken(token string) Option {
 	return func(c *Client) {
-		c.token = token
+		c.token = token // Empty string is valid (clears token)
 	}
 }
 
@@ -150,7 +215,7 @@ type ResponseHook func(resp *http.Response)
 // WithRequestHook sets a hook that is called before each HTTP request.
 //
 // Use this for observability (logging, metrics) or to modify requests
-// before they are sent.
+// before they are sent. Pass nil to clear a previously set hook.
 //
 // Example:
 //
@@ -161,7 +226,7 @@ type ResponseHook func(resp *http.Response)
 //	)
 func WithRequestHook(hook RequestHook) Option {
 	return func(c *Client) {
-		c.requestHook = hook
+		c.requestHook = hook // nil is valid (clears hook)
 	}
 }
 
@@ -169,6 +234,7 @@ func WithRequestHook(hook RequestHook) Option {
 //
 // Use this for observability (logging, metrics) or to inspect responses.
 // Note: The response body may have already been read by the client.
+// Pass nil to clear a previously set hook.
 //
 // Example:
 //
@@ -179,6 +245,6 @@ func WithRequestHook(hook RequestHook) Option {
 //	)
 func WithResponseHook(hook ResponseHook) Option {
 	return func(c *Client) {
-		c.responseHook = hook
+		c.responseHook = hook // nil is valid (clears hook)
 	}
 }
