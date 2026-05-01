@@ -45,9 +45,14 @@ jobs:
               # Use the public REST API directly. We can't use `gh release
               # view --repo tomblancdev/stromboli` here because GITHUB_TOKEN
               # is scoped to THIS repo (stromboli-go) and gh's cross-repo
-              # reads fail with "release not found". The releases endpoint
-              # on public repos doesn't need auth.
-              VERSION=$(curl -fsSL https://api.github.com/repos/tomblancdev/stromboli/releases/latest | jq -r .tag_name)
+              # reads fail with "release not found".
+              #
+              # We hit /releases (plural) rather than /releases/latest
+              # because stromboli currently only ships prereleases
+              # (-alpha tags) and /releases/latest 404s when no stable
+              # release exists. /releases returns everything (sorted
+              # newest first), so we just take [0].
+              VERSION=$(curl -fsSL https://api.github.com/repos/tomblancdev/stromboli/releases | jq -r '[.[] | select(.draft == false)][0].tag_name')
               if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
                 echo "::error::Could not resolve latest stromboli release tag"
                 exit 1
