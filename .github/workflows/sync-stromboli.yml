@@ -33,8 +33,6 @@ jobs:
 
       - name: Resolve dispatch payload
         id: payload
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           # Three ways the version can arrive:
           #   1. repository_dispatch  → client_payload.version
@@ -44,7 +42,16 @@ jobs:
             VERSION="${{ inputs.version }}"
             SWAGGER_URL="${{ inputs.swagger_url }}"
             if [ -z "$VERSION" ]; then
-              VERSION=$(gh release view --repo tomblancdev/stromboli --json tagName --jq .tagName)
+              # Use the public REST API directly. We can't use `gh release
+              # view --repo tomblancdev/stromboli` here because GITHUB_TOKEN
+              # is scoped to THIS repo (stromboli-go) and gh's cross-repo
+              # reads fail with "release not found". The releases endpoint
+              # on public repos doesn't need auth.
+              VERSION=$(curl -fsSL https://api.github.com/repos/tomblancdev/stromboli/releases/latest | jq -r .tag_name)
+              if [ -z "$VERSION" ] || [ "$VERSION" = "null" ]; then
+                echo "::error::Could not resolve latest stromboli release tag"
+                exit 1
+              fi
               echo "::notice::No version input — falling back to latest release: $VERSION"
             fi
           else
