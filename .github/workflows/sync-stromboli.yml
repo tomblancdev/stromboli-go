@@ -97,7 +97,7 @@ jobs:
           cat STROMBOLI_COMPAT
 
       - name: Open PR with compatibility update
-        uses: peter-evans/create-pull-request@v7
+        uses: peter-evans/create-pull-request@v8
         with:
           commit-message: 'chore: sync to stromboli ${{ steps.payload.outputs.version }}'
           title: 'chore: sync to stromboli ${{ steps.payload.outputs.version }}'
